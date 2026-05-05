@@ -1,0 +1,23 @@
+{
+    "name": "domain-manager-mcp",
+    "version": "1.0.0",
+    "description": "MCP server for Cloudflare domain management: zones, DNS, and registrar",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "bun --watch src/index.ts",
+        "build": "bun run build:linux-x64 && bun run build:linux-arm64 && bun run build:macos-arm64",
+        "build:linux-x64": "bun build --compile --target=bun-linux-x64 --outfile=dist/domain-manager-linux-x64 src/index.ts",
+        "build:linux-arm64": "bun build --compile --target=bun-linux-arm64 --outfile=dist/domain-manager-linux-arm64 src/index.ts",
+        "build:macos-arm64": "bun build --compile --target=bun-darwin-arm64 --outfile=dist/domain-manager-macos-arm64 src/index.ts",
+        "type-check": "tsc --noEmit"
+    },
+    "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.15.0",
+        "zod": "^3.24.0"
+    },
+    "devDependencies": {
+        "@types/bun": "latest",
+        "typescript": "^5.8.0"
+    }
+}
