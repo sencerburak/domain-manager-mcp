@@ -9,6 +9,7 @@ import * as listDomains from "./tools/read/list_domains.js";
 import * as getDomain from "./tools/read/get_domain.js";
 import * as getDnsRecords from "./tools/read/get_dns_records.js";
 import * as getTldPricing from "./tools/read/get_tld_pricing.js";
+import * as batchCheckDomains from "./tools/read/batch_check_domains.js";
 
 // Write tools
 import * as registerDomain from "./tools/write/register_domain.js";
@@ -24,7 +25,7 @@ const server = new McpServer({
 });
 
 // Register all read tools
-for (const tool of [checkDomain, searchDomains, listDomains, getDomain, getDnsRecords, getTldPricing]) {
+for (const tool of [checkDomain, searchDomains, listDomains, getDomain, getDnsRecords, getTldPricing, batchCheckDomains]) {
     server.registerTool(tool.name, { description: tool.description, inputSchema: tool.inputSchema }, tool.handler);
 }
 
