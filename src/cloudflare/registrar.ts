@@ -139,3 +139,45 @@ export async function checkAvailabilityRDAP(domain: string): Promise<RDAPResult>
         return { error: `RDAP lookup failed: ${msg}` };
     }
 }
+
+/**
+ * Check domain availability via Cloudflare Registrar API.
+ * Returns availability for TLDs CF supports (e.g. .io, .co, .me that lack RDAP servers).
+ * Returns an error if the TLD is not supported by CF Registrar.
+ */
+export async function checkAvailabilityCF(domain: string): Promise<RDAPResult> {
+    try {
+        const accountId = await getAccountId();
+        const data = await cfClient.get<CFRegistrarDomain>(
+            `/accounts/${accountId}/registrar/domains/${encodeURIComponent(domain)}`,
+        );
+        if (!data.supported_tld) {
+            const tld = domain.split(".").slice(1).join(".");
+            return { error: `TLD .${tld} is not supported by Cloudflare Registrar` };
+        }
+        if (data.available) {
+            return { registered: false };
+        }
+        return {
+            registered: true,
+            registrar: data.registrar ?? undefined,
+            expires: data.expires_at ?? undefined,
+            created: data.registered_at ?? undefined,
+        };
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { error: `CF Registrar lookup failed: ${msg}` };
+    }
+}
+
+/**
+ * Check domain availability — RDAP first, CF Registrar as fallback.
+ * Use this instead of calling checkAvailabilityRDAP directly.
+ */
+export async function checkDomainAvailability(domain: string): Promise<RDAPResult> {
+    const rdap = await checkAvailabilityRDAP(domain);
+    // RDAP gave a definitive answer (registered true/false, not just an error)
+    if (rdap.registered !== undefined) return rdap;
+    // RDAP failed or has no server for this TLD — try CF Registrar as fallback
+    return checkAvailabilityCF(domain);
+}

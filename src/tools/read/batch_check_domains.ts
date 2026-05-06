@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { getZoneByName } from "../../cloudflare/zones.js";
-import { getRegistrarDomain, checkAvailabilityRDAP } from "../../cloudflare/registrar.js";
+import { getRegistrarDomain, checkDomainAvailability } from "../../cloudflare/registrar.js";
 import { textContent } from "../../types.js";
 
 export const name = "batch_check_domains";
@@ -63,7 +63,7 @@ export async function handler(args: z.infer<typeof inputSchema>) {
                 }
 
                 // 3. Check RDAP for availability
-                const rdap = await checkAvailabilityRDAP(domain);
+                const rdap = await checkDomainAvailability(domain);
                 if (rdap.error) {
                     // RDAP lookup failed — can't determine
                     results.push({

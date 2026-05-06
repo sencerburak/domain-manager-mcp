@@ -1,11 +1,11 @@
 import { z } from "zod";
-import { checkAvailabilityRDAP, getTLDPolicies } from "../../cloudflare/registrar.js";
+import { checkDomainAvailability, getTLDPolicies } from "../../cloudflare/registrar.js";
 import { listZones } from "../../cloudflare/zones.js";
 import { textContent } from "../../types.js";
 
 export const name = "search_domains";
 export const description =
-    "Search for available domain names for one or more keywords across multiple TLDs. Checks RDAP for availability and Cloudflare Registrar for pricing. Pass multiple keywords to check all at once instead of calling this tool repeatedly.";
+    "Search for available domain names for one or more keywords across multiple TLDs. Checks availability via RDAP with Cloudflare Registrar API fallback for TLDs like .io, .co, .me. Pass multiple keywords to check all at once instead of calling this tool repeatedly.";
 
 export const inputSchema = z.object({
     keywords: z
@@ -59,7 +59,7 @@ export async function handler(args: z.infer<typeof inputSchema>) {
                     return { domain, available: false, owned: true };
                 }
                 const tld = domain.split(".").slice(1).join(".");
-                const rdap = await checkAvailabilityRDAP(domain);
+                const rdap = await checkDomainAvailability(domain);
                 const price = pricingMap.get(tld);
                 return {
                     domain,

@@ -1,11 +1,11 @@
 import { z } from "zod";
 import { getZoneByName } from "../../cloudflare/zones.js";
-import { getRegistrarDomain, checkAvailabilityRDAP, getTLDPolicies } from "../../cloudflare/registrar.js";
+import { getRegistrarDomain, checkDomainAvailability, getTLDPolicies } from "../../cloudflare/registrar.js";
 import { textContent } from "../../types.js";
 
 export const name = "check_domain";
 export const description =
-    "Check a domain's availability and status. Returns: whether it's registered with your Cloudflare account, active as a CF zone, or available for registration (via public RDAP lookup). Also shows pricing if available on Cloudflare Registrar.";
+    "Check a domain's availability and status. Returns: whether it's registered with your Cloudflare account, active as a CF zone, or available for registration (via RDAP; falls back to Cloudflare Registrar API for TLDs like .io, .co, .me). Also shows pricing if available on Cloudflare Registrar.";
 
 export const inputSchema = z.object({
     domain: z
@@ -65,7 +65,7 @@ export async function handler(args: z.infer<typeof inputSchema>) {
     }
 
     // 3. Check RDAP for availability
-    const rdap = await checkAvailabilityRDAP(domain);
+    const rdap = await checkDomainAvailability(domain);
     if (rdap.error) {
         lines.push("**Status:** Unknown (RDAP lookup failed) ❓");
         lines.push(`**Error:** ${rdap.error}`);
