@@ -1,11 +1,11 @@
 import { z } from "zod";
 import { getZoneByName } from "../../cloudflare/zones.js";
-import { getRegistrarDomain, checkDomainAvailability, getTLDPolicies } from "../../cloudflare/registrar.js";
+import { getRegistrarDomain, checkDomainsBatch, getTLDPolicies } from "../../cloudflare/registrar.js";
 import { textContent } from "../../types.js";
 
 export const name = "check_domain";
 export const description =
-    "Check a domain's availability and status. Returns: whether it's registered with your Cloudflare account, active as a CF zone, or available for registration (via RDAP; falls back to Cloudflare Registrar API for TLDs like .io, .co, .me). Also shows pricing if available on Cloudflare Registrar.";
+    "Check a domain's availability and status. Returns: whether it's registered with your Cloudflare account, active as a CF zone, or available for registration. Uses Cloudflare's authoritative real-time registry API — works for all TLDs (.io, .co, .me, .site, .tech, etc). Also shows pricing when available.";
 
 export const inputSchema = z.object({
     domain: z
@@ -47,8 +47,6 @@ export async function handler(args: z.infer<typeof inputSchema>) {
         lines.push(`**Zone status:** ${zone.status}`);
         lines.push(`**Plan:** ${zone.plan.name}`);
         lines.push(`**Nameservers:** ${zone.name_servers.join(", ")}`);
-
-        // Try to get pricing anyway
         try {
             const tld = apex.split(".").slice(1).join(".");
             const policies = await getTLDPolicies([tld]);
@@ -58,44 +56,45 @@ export async function handler(args: z.infer<typeof inputSchema>) {
                     `| Renewal at CF: $${policies[0].renewal_fee}/yr`,
                 );
             }
-        } catch {
-            /* pricing optional */
-        }
+        } catch { /* pricing optional */ }
         return textContent(lines.join("\n"));
     }
 
-    // 3. Check RDAP for availability
-    const rdap = await checkDomainAvailability(domain);
-    if (rdap.error) {
-        lines.push("**Status:** Unknown (RDAP lookup failed) ❓");
-        lines.push(`**Error:** ${rdap.error}`);
-        lines.push("\nTry again later or contact registrar support for definitive availability.");
-    } else if (rdap.registered) {
-        lines.push("**Status:** Registered (taken) ❌");
-        if (rdap.registrar) lines.push(`**Registrar:** ${rdap.registrar}`);
-        if (rdap.expires) lines.push(`**Expires:** ${rdap.expires}`);
-        if (rdap.created) lines.push(`**Registered:** ${rdap.created}`);
-        lines.push("\n*Not in your Cloudflare account. To manage it, transfer or add it as a zone.*");
-    } else {
-        lines.push("**Status:** Available for registration ✅");
+    // 3. Check availability via CF Registrar (authoritative, real-time)
+    const [result] = await checkDomainsBatch([domain]);
+    if (!result) {
+        lines.push("**Status:** Unknown ❓");
+        lines.push("CF Registrar returned no data for this domain.");
+        return textContent(lines.join("\n"));
+    }
 
-        // Show CF pricing if we support this TLD
-        try {
-            const tld = domain.split(".").slice(1).join(".");
-            const policies = await getTLDPolicies([tld]);
-            if (policies.length > 0 && policies[0].supported) {
-                const p = policies[0];
-                lines.push(`**CF Registration:** $${p.registration_fee}/yr`);
-                lines.push(`**CF Renewal:** $${p.renewal_fee}/yr`);
-                lines.push(
-                    `\nTo register: \`register_domain({ domain: "${domain}" })\``,
-                );
-            } else {
-                lines.push("*TLD not supported by Cloudflare Registrar. Check porkbun.com or namecheap.com.*");
-            }
-        } catch {
-            /* pricing optional */
+    if (result.registrable) {
+        lines.push("**Status:** Available for registration ✅");
+        if (result.pricing) {
+            lines.push(`**CF Registration:** $${result.pricing.registration_cost} ${result.pricing.currency}/yr`);
+            lines.push(`**CF Renewal:** $${result.pricing.renewal_cost} ${result.pricing.currency}/yr`);
         }
+        if (result.tier === "premium") lines.push("**Note:** Premium domain");
+        lines.push(`\nTo register: \`register_domain({ domain: "${domain}" })\``);
+    } else if (result.reason === "domain_unavailable") {
+        lines.push("**Status:** Registered (taken) ❌");
+        lines.push("\n*Not in your Cloudflare account. To manage it, transfer or add it as a zone.*");
+    } else if (result.reason === "extension_not_supported_via_api") {
+        lines.push("**Status:** TLD available via Cloudflare dashboard (not API) ⚠️");
+        lines.push("*This TLD can be registered through the CF Registrar web UI but not programmatically.*");
+    } else if (result.reason === "extension_not_supported") {
+        lines.push("**Status:** TLD not supported by Cloudflare Registrar ⚠️");
+        lines.push("*Check porkbun.com or namecheap.com to register this TLD.*");
+    } else if (result.reason === "domain_premium") {
+        lines.push("**Status:** Available (premium domain) ✅");
+        if (result.pricing) {
+            lines.push(`**CF Registration:** $${result.pricing.registration_cost} ${result.pricing.currency}/yr`);
+            lines.push(`**CF Renewal:** $${result.pricing.renewal_cost} ${result.pricing.currency}/yr`);
+        }
+        lines.push(`\nTo register: \`register_domain({ domain: "${domain}" })\``);
+    } else {
+        lines.push("**Status:** Unknown ❓");
+        if (result.reason) lines.push(`**Reason:** ${result.reason}`);
     }
 
     return textContent(lines.join("\n"));

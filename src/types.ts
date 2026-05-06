@@ -154,14 +154,25 @@ export interface CFAccount {
     type: string;
 }
 
-// ─── RDAP (public availability check) ────────────────────────────────────────
+// ─── CF domain availability check ──────────────────────────────────────────────
 
-export interface RDAPResult {
-    registered?: boolean; // undefined if error/unknown
-    registrar?: string;
-    expires?: string;
-    created?: string;
-    error?: string; // if RDAP lookup failed
+export type CFDomainCheckReason =
+    | "extension_not_supported_via_api"
+    | "extension_not_supported"
+    | "extension_disallows_registration"
+    | "domain_premium"
+    | "domain_unavailable";
+
+export interface CFDomainCheckResult {
+    name: string;
+    registrable: boolean;
+    pricing?: {
+        currency: string;
+        registration_cost: string;
+        renewal_cost: string;
+    };
+    reason?: CFDomainCheckReason;
+    tier?: "standard" | "premium";
 }
 
 // ─── Tool result helpers ──────────────────────────────────────────────────────

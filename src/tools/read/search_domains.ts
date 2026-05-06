@@ -1,11 +1,11 @@
 import { z } from "zod";
-import { checkDomainAvailability, getTLDPolicies } from "../../cloudflare/registrar.js";
+import { checkDomainsBatch } from "../../cloudflare/registrar.js";
 import { listZones } from "../../cloudflare/zones.js";
 import { textContent } from "../../types.js";
 
 export const name = "search_domains";
 export const description =
-    "Search for available domain names for one or more keywords across multiple TLDs. Checks availability via RDAP with Cloudflare Registrar API fallback for TLDs like .io, .co, .me. Pass multiple keywords to check all at once instead of calling this tool repeatedly.";
+    "Search for available domain names for one or more keywords across multiple TLDs. Uses Cloudflare's authoritative real-time registry check — works for all TLDs (.io, .co, .me, .site, .tech, etc). Pass multiple keywords to check all at once instead of calling this tool repeatedly.";
 
 export const inputSchema = z.object({
     keywords: z
@@ -21,7 +21,6 @@ export const inputSchema = z.object({
 });
 
 export async function handler(args: z.infer<typeof inputSchema>) {
-    // Normalize: keywords can be string or array
     const keywords = (Array.isArray(args.keywords) ? args.keywords : [args.keywords])
         .map((k) => k.toLowerCase().trim());
     const tlds = args.tlds.map((t) => t.toLowerCase().replace(/^\./, ""));
@@ -31,56 +30,41 @@ export async function handler(args: z.infer<typeof inputSchema>) {
     try {
         const zones = await listZones();
         zones.forEach((z) => ownedZones.add(z.name));
-    } catch {
-        /* non-fatal */
-    }
+    } catch { /* non-fatal */ }
 
-    // Pre-fetch CF pricing for all requested TLDs
-    const pricingMap = new Map<string, string>();
-    try {
-        const policies = await getTLDPolicies(tlds);
-        for (const p of policies) {
-            if (p.supported) pricingMap.set(p.tld, p.registration_fee);
-        }
-    } catch {
-        /* non-fatal */
-    }
-
-    // Check all keyword × TLD combinations in parallel (max 10 concurrent)
+    // Build full matrix and separate owned from those needing check
     const allDomains = keywords.flatMap((kw) => tlds.map((tld) => `${kw}.${tld}`));
+    const toCheck = allDomains.filter((d) => !ownedZones.has(d));
 
-    const checkBatch = async (domains: string[]) => {
-        const CONCURRENCY = 10;
-        const results: { domain: string; available: boolean | null; owned: boolean; price?: string }[] = [];
-        for (let i = 0; i < domains.length; i += CONCURRENCY) {
-            const chunk = domains.slice(i, i + CONCURRENCY);
-            const chunkResults = await Promise.all(chunk.map(async (domain) => {
-                if (ownedZones.has(domain)) {
-                    return { domain, available: false, owned: true };
-                }
-                const tld = domain.split(".").slice(1).join(".");
-                const rdap = await checkDomainAvailability(domain);
-                const price = pricingMap.get(tld);
-                return {
-                    domain,
-                    available: rdap.error ? null : !rdap.registered,
-                    owned: false,
-                    price,
-                };
-            }));
-            results.push(...chunkResults);
+    // CF batch check — up to 20 per request, chunked automatically
+    const cfResults = await checkDomainsBatch(toCheck);
+    const cfMap = new Map(cfResults.map((r) => [r.name, r]));
+
+    type RowResult = { domain: string; available: boolean | null; owned: boolean; price?: string; reason?: string };
+    const results: RowResult[] = allDomains.map((domain) => {
+        if (ownedZones.has(domain)) return { domain, available: false, owned: true };
+        const r = cfMap.get(domain);
+        if (!r) return { domain, available: null, owned: false };
+        if (r.registrable) {
+            const price = r.pricing ? `$${r.pricing.registration_cost} ${r.pricing.currency}` : undefined;
+            return { domain, available: true, owned: false, price };
         }
-        return results;
-    };
-
-    const results = await checkBatch(allDomains);
+        const available = r.reason === "extension_not_supported_via_api" ? null
+            : r.reason === "extension_not_supported" ? null
+            : r.reason === "domain_premium" ? true
+            : false;
+        const reason = r.reason === "extension_not_supported_via_api" ? "use CF dashboard"
+            : r.reason === "extension_not_supported" ? "TLD not in CF Registrar"
+            : r.reason === "domain_premium" ? "premium domain"
+            : undefined;
+        return { domain, available, owned: false, reason };
+    });
 
     const lines: string[] = [
         `## Domain Search: ${keywords.map((k) => `"${k}"`).join(", ")}`,
         `Checked ${results.length} combinations (${keywords.length} keyword(s) × ${tlds.length} TLD(s))\n`,
     ];
 
-    // Group by keyword if multiple keywords
     const grouped = keywords.length > 1;
     for (const kw of keywords) {
         const kwResults = results.filter((r) => r.domain.startsWith(`${kw}.`));
@@ -89,21 +73,26 @@ export async function handler(args: z.infer<typeof inputSchema>) {
             lines.push(`### "${kw}" — ${avail} available`);
         }
 
-        lines.push(`${"Domain".padEnd(35)} ${"Status".padEnd(15)} ${"CF Price"}`);
+        lines.push(`${"Domain".padEnd(35)} ${"Status".padEnd(18)} ${"Price"}`);
         lines.push(`${"-".repeat(65)}`);
 
         for (const r of kwResults) {
             if (args.available_only && r.available !== true && !r.owned) continue;
-            const status = r.owned ? "yours ✅" : r.available === true ? "available ✅" : r.available === null ? "unknown ❓" : "taken ❌";
-            const price = r.owned ? "owned" : r.available === true && r.price ? `$${r.price}/yr` : r.available === true ? "check CF" : "-";
-            lines.push(`${r.domain.padEnd(35)} ${status.padEnd(15)} ${price}`);
+            const status = r.owned ? "yours ✅"
+                : r.available === true ? "available ✅"
+                : r.available === null ? `unknown ❓${r.reason ? ` (${r.reason})` : ""}`
+                : "taken ❌";
+            const price = r.owned ? "owned"
+                : r.available === true && r.price ? r.price
+                : r.available === true ? "premium"
+                : "-";
+            lines.push(`${r.domain.padEnd(35)} ${status.padEnd(18)} ${price}`);
         }
         lines.push("");
     }
 
     const available = results.filter((r) => r.available === true && !r.owned);
     lines.push(`**Summary:** ${available.length}/${results.length} available`);
-
     if (available.length > 0) {
         lines.push(`\nTo register: \`register_domain({ domain: "${available[0].domain}" })\``);
     }

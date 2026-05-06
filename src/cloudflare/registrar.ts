@@ -1,5 +1,5 @@
 import { cfClient, getAccountId, CFError } from "./client.js";
-import type { CFRegistrarDomain, CFTLDPolicy, RDAPResult } from "../types.js";
+import type { CFRegistrarDomain, CFTLDPolicy, CFDomainCheckResult } from "../types.js";
 
 /** List all domains registered through Cloudflare Registrar. */
 export async function listRegistrarDomains(): Promise<CFRegistrarDomain[]> {
@@ -87,97 +87,32 @@ export async function updateDomainSettings(
     );
 }
 
-// ─── Availability check via public RDAP ──────────────────────────────────────
+// ─── Availability check via CF Registrar API ─────────────────────────────────
 
 /**
- * Check domain availability using the public RDAP protocol.
- * RDAP (RFC 7483) is a standard public registry lookup with no auth required.
- * 404 = domain not registered (likely available); 200 = domain taken.
- * On error/timeout, returns error field so caller can distinguish from definite "taken".
+ * Check availability of up to 20 domains per call using Cloudflare's
+ * authoritative domain-check endpoint (POST /registrar/domain-check).
+ * Handles chunking automatically for larger lists.
+ *
+ * Returns one CFDomainCheckResult per domain:
+ *   registrable: true                        → available + pricing included
+ *   registrable: false, reason: domain_unavailable        → taken
+ *   registrable: false, reason: extension_not_supported   → TLD not in CF Registrar at all
+ *   registrable: false, reason: extension_not_supported_via_api → available via CF dashboard only
+ *   registrable: false, reason: domain_premium            → available but premium priced
  */
-export async function checkAvailabilityRDAP(domain: string): Promise<RDAPResult> {
-    try {
-        const resp = await fetch(`https://rdap.org/domain/${encodeURIComponent(domain)}`, {
-            headers: { Accept: "application/rdap+json" },
-            signal: AbortSignal.timeout(8000),
-        });
-
-        if (resp.status === 404) {
-            if (!resp.redirected) {
-                // rdap.org didn't redirect → this TLD has no RDAP server in the IANA
-                // bootstrap. We cannot determine availability via RDAP.
-                const tld = domain.split(".").slice(1).join(".");
-                return { error: `No RDAP server for .${tld} — cannot verify availability` };
-            }
-            // rdap.org redirected to an authoritative registry which returned 404
-            // → domain is genuinely not registered
-            return { registered: false };
-        }
-
-        if (!resp.ok) {
-            return { error: `RDAP returned ${resp.status}` };
-        }
-
-        const data = (await resp.json()) as {
-            events?: { eventAction: string; eventDate: string }[];
-            entities?: { roles: string[]; vcardArray?: unknown[] }[];
-        };
-
-        const expiry = data.events?.find((e) => e.eventAction === "expiration")?.eventDate;
-        const created = data.events?.find((e) => e.eventAction === "registration")?.eventDate;
-
-        // Find registrar entity
-        const registrarEntity = data.entities?.find((e) => e.roles?.includes("registrar"));
-        const vcardArray = registrarEntity?.vcardArray as Array<Array<unknown>> | undefined;
-        const fnEntry = vcardArray?.[1]?.find((v: unknown) => Array.isArray(v) && (v as unknown[])[0] === "fn") as unknown[] | undefined;
-        const registrar = fnEntry?.[3] as string | undefined;
-
-        return { registered: true, registrar, expires: expiry, created };
-    } catch (e) {
-        // Network error / timeout / parse error
-        const msg = e instanceof Error ? e.message : String(e);
-        return { error: `RDAP lookup failed: ${msg}` };
-    }
-}
-
-/**
- * Check domain availability via Cloudflare Registrar API.
- * Returns availability for TLDs CF supports (e.g. .io, .co, .me that lack RDAP servers).
- * Returns an error if the TLD is not supported by CF Registrar.
- */
-export async function checkAvailabilityCF(domain: string): Promise<RDAPResult> {
-    try {
-        const accountId = await getAccountId();
-        const data = await cfClient.get<CFRegistrarDomain>(
-            `/accounts/${accountId}/registrar/domains/${encodeURIComponent(domain)}`,
+export async function checkDomainsBatch(domains: string[]): Promise<CFDomainCheckResult[]> {
+    if (domains.length === 0) return [];
+    const accountId = await getAccountId();
+    const results: CFDomainCheckResult[] = [];
+    // API limit: 20 domains per request
+    for (let i = 0; i < domains.length; i += 20) {
+        const chunk = domains.slice(i, i + 20);
+        const data = await cfClient.post<{ domains: CFDomainCheckResult[] }>(
+            `/accounts/${accountId}/registrar/domain-check`,
+            { domains: chunk },
         );
-        if (!data.supported_tld) {
-            const tld = domain.split(".").slice(1).join(".");
-            return { error: `TLD .${tld} is not supported by Cloudflare Registrar` };
-        }
-        if (data.available) {
-            return { registered: false };
-        }
-        return {
-            registered: true,
-            registrar: data.registrar ?? undefined,
-            expires: data.expires_at ?? undefined,
-            created: data.registered_at ?? undefined,
-        };
-    } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return { error: `CF Registrar lookup failed: ${msg}` };
+        results.push(...(data.domains ?? []));
     }
-}
-
-/**
- * Check domain availability — RDAP first, CF Registrar as fallback.
- * Use this instead of calling checkAvailabilityRDAP directly.
- */
-export async function checkDomainAvailability(domain: string): Promise<RDAPResult> {
-    const rdap = await checkAvailabilityRDAP(domain);
-    // RDAP gave a definitive answer (registered true/false, not just an error)
-    if (rdap.registered !== undefined) return rdap;
-    // RDAP failed or has no server for this TLD — try CF Registrar as fallback
-    return checkAvailabilityCF(domain);
+    return results;
 }
