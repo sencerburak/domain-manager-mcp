@@ -175,6 +175,30 @@ export interface CFDomainCheckResult {
     tier?: "standard" | "premium";
 }
 
+/** Result from the new Registrar beta API POST /registrar/registrations */
+export interface CFRegistrationResult {
+    domain_name: string;
+    state: "in_progress" | "succeeded" | "failed" | "action_required" | "blocked";
+    completed: boolean;
+    created_at: string;
+    updated_at: string;
+    context?: {
+        registration?: {
+            domain_name: string;
+            status: string;
+            created_at: string;
+            expires_at: string;
+            auto_renew: boolean;
+            privacy_mode: string;
+            locked: boolean;
+        };
+    };
+    links?: {
+        self: string;
+        resource: string;
+    };
+}
+
 // ─── Tool result helpers ──────────────────────────────────────────────────────
 
 export function textContent(text: string) {

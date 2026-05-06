@@ -1,6 +1,6 @@
 {
     "name": "domain-manager-mcp",
-    "version": "1.11.0",
+    "version": "1.12.0",
     "description": "MCP server for Cloudflare domain management: zones, DNS, and registrar",
     "private": true,
     "type": "module",

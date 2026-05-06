@@ -53,15 +53,16 @@ export async function handler(args: z.infer<typeof inputSchema>) {
             years: args.years,
         });
 
-        console.log(`[Tool] register_domain succeeded`);
+        const reg = result.context?.registration;
+        console.log(`[Tool] register_domain succeeded: state=${result.state}`);
         return textContent(
             [
                 `## Domain Registered: ${domain} ✅`,
                 priceLine,
-                `**Expires:** ${result.expires_at?.slice(0, 10) ?? "unknown"}`,
-                `**Auto-renew:** ${result.auto_renew ? "enabled" : "disabled"}`,
-                `**Privacy:** ${result.privacy ? "enabled" : "disabled"}`,
-                `**Nameservers:** ${result.name_servers?.join(", ") ?? "pending"}`,
+                `**Expires:** ${reg?.expires_at?.slice(0, 10) ?? "pending"}`,
+                `**Auto-renew:** ${reg?.auto_renew ? "enabled" : "disabled"}`,
+                `**Privacy:** ${reg?.privacy_mode ?? "default"}`,
+                `**Status:** ${result.state}`,
                 `\nA Cloudflare zone for ${domain} should be created automatically.`,
                 `To add DNS records: \`create_dns_record({ domain: "${domain}", ... })\``,
             ]

@@ -1,5 +1,5 @@
 import { cfClient, getAccountId, CFError } from "./client.js";
-import type { CFRegistrarDomain, CFTLDPolicy, CFDomainCheckResult } from "../types.js";
+import type { CFRegistrarDomain, CFTLDPolicy, CFDomainCheckResult, CFRegistrationResult } from "../types.js";
 
 /** List all domains registered through Cloudflare Registrar. */
 export async function listRegistrarDomains(): Promise<CFRegistrarDomain[]> {
@@ -51,36 +51,49 @@ export async function getTLDPolicies(tlds?: string[]): Promise<CFTLDPolicy[]> {
 }
 
 /**
- * Register a domain via Cloudflare Registrar.
- * The domain must already have a zone on Cloudflare (or be a new purchase).
+ * Register a domain via Cloudflare Registrar (new beta API).
+ * Uses POST /registrar/registrations which requires Registrar Domains Admin permission.
+ * Polls for completion if response is async (202).
  */
 export async function registerDomain(
     domainName: string,
     opts: { auto_renew?: boolean; privacy?: boolean; years?: number } = {},
-): Promise<CFRegistrarDomain> {
+): Promise<CFRegistrationResult> {
     console.log(`[Registrar] registerDomain('${domainName}', ${JSON.stringify(opts)})`);
-    try {
-        const accountId = await getAccountId();
-        console.log(`[Registrar] Got account ID: ${accountId}`);
+    const accountId = await getAccountId();
+    console.log(`[Registrar] Got account ID: ${accountId}`);
 
-        const body: Record<string, unknown> = {
-            name: domainName,
-            auto_renew: opts.auto_renew ?? true,
-            privacy: opts.privacy ?? false,
-        };
-        if (opts.years) body.years = opts.years;
+    const body: Record<string, unknown> = { domain_name: domainName };
+    console.log(`[Registrar] Calling POST /accounts/${accountId}/registrar/registrations with:`, JSON.stringify(body));
 
-        console.log(`[Registrar] Calling POST /accounts/${accountId}/registrar/domains with:`, JSON.stringify(body));
-        const result = await cfClient.post<CFRegistrarDomain>(
-            `/accounts/${accountId}/registrar/domains`,
-            body,
-        );
-        console.log(`[Registrar] Domain registered successfully:`, result.domain, `expires: ${result.expires_at}`);
-        return result;
-    } catch (err) {
-        console.error(`[Registrar] Error registering domain:`, err instanceof Error ? err.message : String(err));
-        throw err;
+    let result = await cfClient.post<CFRegistrationResult>(
+        `/accounts/${accountId}/registrar/registrations`,
+        body,
+    );
+    console.log(`[Registrar] Initial response: state=${result.state}, completed=${result.completed}`);
+
+    // Poll if still in progress (async / 202 response)
+    if (!result.completed && result.state === "in_progress") {
+        console.log(`[Registrar] Registration in progress, polling status...`);
+        for (let i = 0; i < 10; i++) {
+            await new Promise<void>((r) => setTimeout(r, 2000));
+            result = await cfClient.get<CFRegistrationResult>(
+                `/accounts/${accountId}/registrar/registrations/${encodeURIComponent(domainName)}/registration-status`,
+            );
+            console.log(`[Registrar] Poll ${i + 1}: state=${result.state}, completed=${result.completed}`);
+            if (result.completed || result.state === "failed" || result.state === "action_required" || result.state === "blocked") break;
+        }
     }
+
+    if (result.state === "failed") {
+        throw new Error(`Registration failed for ${domainName}`);
+    }
+    if (result.state === "action_required") {
+        throw new Error(`Registration requires manual action for ${domainName}`);
+    }
+
+    console.log(`[Registrar] Domain registered successfully: ${domainName}, state=${result.state}`);
+    return result;
 }
 
 /** Renew a domain registered through Cloudflare Registrar. */
