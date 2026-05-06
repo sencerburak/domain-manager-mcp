@@ -22,6 +22,7 @@ export async function handler(args: z.infer<typeof inputSchema>) {
 
     // 1. Check CF registrar (user owns it via CF)
     const registrarDomain = await getRegistrarDomain(apex);
+    console.error(`[DEBUG check_domain] getRegistrarDomain(${apex}) returned:`, JSON.stringify(registrarDomain));
     if (registrarDomain) {
         lines.push("**Status:** Registered with Cloudflare Registrar ✅");
         lines.push(`**Expires:** ${registrarDomain.expires_at ?? "unknown"}`);

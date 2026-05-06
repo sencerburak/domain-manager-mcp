@@ -39,6 +39,7 @@ export async function handler(args: z.infer<typeof inputSchema>) {
             const domain = `${name.toLowerCase()}.${tld}`;
             try {
                 const registrarDomain = await getRegistrarDomain(domain);
+                console.error(`[DEBUG] getRegistrarDomain(${domain}) returned:`, JSON.stringify(registrarDomain));
                 if (registrarDomain) {
                     ownershipResults.set(domain, {
                         domain,
@@ -55,15 +56,20 @@ export async function handler(args: z.infer<typeof inputSchema>) {
                         notes: `Active CF zone (${zone.status})`,
                     });
                 }
-            } catch { /* non-fatal — will fall through to availability check */ }
+            } catch (e) {
+                console.error(`[DEBUG] Error checking ${domain}:`, e instanceof Error ? e.message : String(e));
+                /* non-fatal — will fall through to availability check */
+            }
         }
     }
 
     // 2. Batch-check availability for domains not already resolved
     const allDomains = names.flatMap((n) => normalizedTlds.map((t) => `${n.toLowerCase()}.${t}`));
     const toCheck = allDomains.filter((d) => !ownershipResults.has(d));
+    console.error(`[DEBUG] allDomains: ${JSON.stringify(allDomains)}, ownershipResults size: ${ownershipResults.size}, toCheck: ${JSON.stringify(toCheck)}`);
     const cfResults = await checkDomainsBatch(toCheck);
     const cfMap = new Map(cfResults.map((r) => [r.name, r]));
+    console.error(`[DEBUG] cfResults count: ${cfResults.length}`);
 
     // 3. Merge
     for (const domain of allDomains) {
