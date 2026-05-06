@@ -55,16 +55,16 @@ jobs:
                   KOMODO_API_SECRET: ${{ secrets.KOMODO_API_SECRET }}
               run: |
                   if [ -z "$KOMODO_API_KEY" ] || [ -z "$KOMODO_API_SECRET" ]; then
-                    echo "⚠️  WARNING: KOMODO_API_KEY and KOMODO_API_SECRET secrets not configured"
-                    echo "    domain-manager-mcp image is built and pushed to GHCR, but stack won't auto-redeploy"
+                    echo "❌ ERROR: KOMODO_API_KEY and KOMODO_API_SECRET secrets not configured"
+                    echo "   domain-manager-mcp image is built and pushed to GHCR, but stack won't auto-redeploy"
                     echo ""
-                    echo "    To enable auto-deploy:"
-                    echo "    1. In Komodo UI (https://komodo.motorama.app), ensure a service user with Execute"
-                    echo "       permission on the 'agents' stack exists. Use github-actions or create new."
-                    echo "    2. Add to domain-manager-mcp repo secrets:"
-                    echo "       - KOMODO_API_KEY"
-                    echo "       - KOMODO_API_SECRET"
-                    exit 0
+                    echo "   To enable auto-deploy:"
+                    echo "   1. In Komodo UI (https://komodo.motorama.app), ensure a service user with Execute"
+                    echo "      permission on the 'agents' stack exists. Use github-actions or create new."
+                    echo "   2. Add to domain-manager-mcp repo secrets:"
+                    echo "      - KOMODO_API_KEY"
+                    echo "      - KOMODO_API_SECRET"
+                    exit 1
                   fi
                   echo "Triggering Komodo agents stack redeploy..."
                   response=$(curl -s -X POST "$KOMODO_BASE/execute" \
@@ -74,7 +74,7 @@ jobs:
                     -d '{"type":"DeployStack","params":{"stack":"agents"}}')
                   echo "$response" | jq .
                   if echo "$response" | jq -e '.error' > /dev/null 2>&1; then
-                    echo "ERROR: Komodo API returned error"
+                    echo "❌ ERROR: Komodo API returned error"
                     exit 1
                   fi
                   echo "✅ Stack redeploy triggered successfully"
