@@ -66,7 +66,11 @@ export async function handler(args: z.infer<typeof inputSchema>) {
 
     // 3. Check RDAP for availability
     const rdap = await checkAvailabilityRDAP(domain);
-    if (rdap.registered) {
+    if (rdap.error) {
+        lines.push("**Status:** Unknown (RDAP lookup failed) ❓");
+        lines.push(`**Error:** ${rdap.error}`);
+        lines.push("\nTry again later or contact registrar support for definitive availability.");
+    } else if (rdap.registered) {
         lines.push("**Status:** Registered (taken) ❌");
         if (rdap.registrar) lines.push(`**Registrar:** ${rdap.registrar}`);
         if (rdap.expires) lines.push(`**Expires:** ${rdap.expires}`);

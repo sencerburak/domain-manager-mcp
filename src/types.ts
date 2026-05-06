@@ -157,10 +157,11 @@ export interface CFAccount {
 // ─── RDAP (public availability check) ────────────────────────────────────────
 
 export interface RDAPResult {
-    registered: boolean;
+    registered?: boolean; // undefined if error/unknown
     registrar?: string;
     expires?: string;
     created?: string;
+    error?: string; // if RDAP lookup failed
 }
 
 // ─── Tool result helpers ──────────────────────────────────────────────────────

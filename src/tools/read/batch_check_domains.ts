@@ -22,7 +22,7 @@ export const inputSchema = z.object({
 
 type CheckResult = {
     domain: string;
-    status: "owned" | "zone" | "available" | "taken";
+    status: "owned" | "zone" | "available" | "taken" | "unknown";
     notes?: string;
 };
 
@@ -64,7 +64,14 @@ export async function handler(args: z.infer<typeof inputSchema>) {
 
                 // 3. Check RDAP for availability
                 const rdap = await checkAvailabilityRDAP(domain);
-                if (rdap.registered) {
+                if (rdap.error) {
+                    // RDAP lookup failed — can't determine
+                    results.push({
+                        domain,
+                        status: "unknown",
+                        notes: `${rdap.error} (try check_domain for details)`,
+                    });
+                } else if (rdap.registered) {
                     results.push({
                         domain,
                         status: "taken",
@@ -79,8 +86,8 @@ export async function handler(args: z.infer<typeof inputSchema>) {
             } catch (error) {
                 results.push({
                     domain,
-                    status: "taken",
-                    notes: `Error checking (assumed taken): ${error instanceof Error ? error.message : String(error)}`,
+                    status: "unknown",
+                    notes: `Error checking: ${error instanceof Error ? error.message : String(error)}`,
                 });
             }
         }
@@ -92,6 +99,7 @@ export async function handler(args: z.infer<typeof inputSchema>) {
         zone: results.filter((r) => r.status === "zone"),
         available: results.filter((r) => r.status === "available"),
         taken: results.filter((r) => r.status === "taken"),
+        unknown: results.filter((r) => r.status === "unknown"),
     };
 
     const lines: string[] = ["## Batch Domain Check Results\n"];
@@ -129,7 +137,15 @@ export async function handler(args: z.infer<typeof inputSchema>) {
         lines.push("");
     }
 
-    lines.push(`\n**Summary:** ${byStatus.available.length} available | ${byStatus.owned.length} owned | ${byStatus.zone.length} zones | ${byStatus.taken.length} taken`);
+    if (byStatus.unknown.length > 0) {
+        lines.push("### ❓ Unknown (RDAP lookup failed)");
+        for (const r of byStatus.unknown) {
+            lines.push(`- **${r.domain}** ${r.notes ? `(${r.notes})` : ""}`);
+        }
+        lines.push("");
+    }
+
+    lines.push(`\n**Summary:** ${byStatus.available.length} available | ${byStatus.owned.length} owned | ${byStatus.zone.length} zones | ${byStatus.taken.length} taken | ${byStatus.unknown.length} unknown`);
 
     return textContent(lines.join("\n"));
 }

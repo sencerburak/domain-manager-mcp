@@ -93,6 +93,7 @@ export async function updateDomainSettings(
  * Check domain availability using the public RDAP protocol.
  * RDAP (RFC 7483) is a standard public registry lookup with no auth required.
  * 404 = domain not registered (likely available); 200 = domain taken.
+ * On error/timeout, returns error field so caller can distinguish from definite "taken".
  */
 export async function checkAvailabilityRDAP(domain: string): Promise<RDAPResult> {
     try {
@@ -106,8 +107,8 @@ export async function checkAvailabilityRDAP(domain: string): Promise<RDAPResult>
         }
 
         if (!resp.ok) {
-            // Can't determine — treat as unknown, not available
-            return { registered: true };
+            // Non-404 error (50x, 429, etc) — can't determine, return error
+            return { error: `RDAP returned ${resp.status}` };
         }
 
         const data = (await resp.json()) as {
@@ -125,8 +126,9 @@ export async function checkAvailabilityRDAP(domain: string): Promise<RDAPResult>
         const registrar = fnEntry?.[3] as string | undefined;
 
         return { registered: true, registrar, expires: expiry, created };
-    } catch {
-        // Network error / timeout — assume taken to be safe
-        return { registered: true };
+    } catch (e) {
+        // Network error / timeout / parse error
+        const msg = e instanceof Error ? e.message : String(e);
+        return { error: `RDAP lookup failed: ${msg}` };
     }
 }
