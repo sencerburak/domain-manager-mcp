@@ -103,11 +103,18 @@ export async function checkAvailabilityRDAP(domain: string): Promise<RDAPResult>
         });
 
         if (resp.status === 404) {
+            if (!resp.redirected) {
+                // rdap.org didn't redirect → this TLD has no RDAP server in the IANA
+                // bootstrap. We cannot determine availability via RDAP.
+                const tld = domain.split(".").slice(1).join(".");
+                return { error: `No RDAP server for .${tld} — cannot verify availability` };
+            }
+            // rdap.org redirected to an authoritative registry which returned 404
+            // → domain is genuinely not registered
             return { registered: false };
         }
 
         if (!resp.ok) {
-            // Non-404 error (50x, 429, etc) — can't determine, return error
             return { error: `RDAP returned ${resp.status}` };
         }
 
