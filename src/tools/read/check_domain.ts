@@ -6,7 +6,7 @@ import { textContent } from "../../types.js";
 
 export const name = "check_domain";
 export const description =
-    "Check a domain's availability and status. Returns: whether it's registered with your Cloudflare account, active as a CF zone, or available for registration. Uses Cloudflare's authoritative real-time registry API — works for all TLDs (.io, .co, .me, .site, .tech, etc). Also shows pricing when available.";
+    "Check a domain's availability and pricing across multiple registrars (Cloudflare, Porkbun). Shows: your CF account ownership, active CF zones, availability status, and pricing comparison from both providers. Uses real-time registry data.";
 
 export const inputSchema = z.object({
     domain: z
@@ -18,12 +18,12 @@ export const inputSchema = z.object({
 export async function handler(args: z.infer<typeof inputSchema>) {
     const domain = args.domain.toLowerCase();
     const apex = domain.split(".").slice(-2).join(".");
+    const tld = apex.split(".").slice(-1)[0];
 
     const lines: string[] = [`## Domain: ${domain}\n`];
 
     // 1. Check CF registrar (user owns it via CF)
     const registrarDomain = await getRegistrarDomain(apex);
-    console.error(`[DEBUG check_domain] getRegistrarDomain(${apex}) returned:`, JSON.stringify(registrarDomain));
     if (registrarDomain) {
         lines.push("**Status:** Registered with Cloudflare Registrar ✅");
         lines.push(`**Expires:** ${registrarDomain.expires_at ?? "unknown"}`);
@@ -52,53 +52,61 @@ export async function handler(args: z.infer<typeof inputSchema>) {
         return textContent(lines.join("\n"));
     }
 
-    // 3. Check availability via CF Registrar (authoritative, real-time)
-    const [result] = await checkDomainsBatch([domain]);
-    if (!result) {
-        lines.push("**Status:** Unknown ❓");
-        lines.push("CF Registrar returned no data for this domain.");
-        return textContent(lines.join("\n"));
+    // 3. Check availability via both CF and Porkbun
+    const [cfResult] = await checkDomainsBatch([domain]);
+    const pbPricing = await getPorkbunPricing([tld]);
+    const pbPrice = pbPricing.get(tld);
+
+    // Determine status and build comparison table
+    let status = "Unknown ❓";
+    let cfAvailable = false;
+    let pbAvailable = false;
+
+    if (cfResult?.registrable) {
+        status = "Available for registration ✅";
+        cfAvailable = true;
+    } else if (cfResult?.reason === "domain_unavailable") {
+        status = "Registered (taken) ❌";
+    } else if (cfResult?.reason === "extension_not_supported_via_api" || cfResult?.reason === "extension_not_supported") {
+        status = "TLD not fully supported by CF API ⚠️";
+    } else if (!cfResult) {
+        status = "No CF data ⚠️";
     }
 
-    if (result.registrable) {
-        lines.push("**Status:** Available for registration ✅");
-        if (result.pricing) {
-            lines.push(`**CF Registration:** $${result.pricing.registration_cost} ${result.pricing.currency}/yr`);
-            lines.push(`**CF Renewal:** $${result.pricing.renewal_cost} ${result.pricing.currency}/yr`);
-        }
-        if (result.tier === "premium") lines.push("**Note:** Premium domain");
-        lines.push(`\nTo register: \`register_domain({ domain: "${domain}" })\``);
-    } else if (result.reason === "domain_unavailable") {
-        lines.push("**Status:** Registered (taken) ❌");
-        lines.push("\n*Not in your Cloudflare account. To manage it, transfer or add it as a zone.*");
-    } else if (result.reason === "extension_not_supported_via_api") {
-        lines.push("**Status:** TLD available via Cloudflare dashboard (not API) ⚠️");
-        lines.push("*This TLD can be registered through the CF Registrar web UI but not programmatically.*");
-        const tld = apex.split(".").slice(1).join(".");
-        const pbPricing = await getPorkbunPricing([tld]);
-        const pb = pbPricing.get(tld);
-        if (pb) lines.push(`**Porkbun pricing:** reg $${pb.registration}/yr · renew $${pb.renewal}/yr`);
-    } else if (result.reason === "extension_not_supported") {
-        lines.push("**Status:** TLD not supported by Cloudflare Registrar ⚠️");
-        const tld = apex.split(".").slice(1).join(".");
-        const pbPricing = await getPorkbunPricing([tld]);
-        const pb = pbPricing.get(tld);
-        if (pb) {
-            lines.push(`**Porkbun pricing:** reg $${pb.registration}/yr · renew $${pb.renewal}/yr`);
-            lines.push(`*Register at porkbun.com or use \`register_domain\` if Porkbun is configured.*`);
-        } else {
-            lines.push("*Check porkbun.com or namecheap.com to register this TLD.*");
-        }
-    } else if (result.reason === "domain_premium") {
-        lines.push("**Status:** Available (premium domain) ✅");
-        if (result.pricing) {
-            lines.push(`**CF Registration:** $${result.pricing.registration_cost} ${result.pricing.currency}/yr`);
-            lines.push(`**CF Renewal:** $${result.pricing.renewal_cost} ${result.pricing.currency}/yr`);
-        }
-        lines.push(`\nTo register: \`register_domain({ domain: "${domain}" })\``);
-    } else {
-        lines.push("**Status:** Unknown ❓");
-        if (result.reason) lines.push(`**Reason:** ${result.reason}`);
+    lines.push(`**Status:** ${status}`);
+    lines.push("");
+
+    // Pricing comparison
+    lines.push("### Pricing Comparison");
+    lines.push(`${"Registrar".padEnd(20)} ${"Registration".padEnd(15)} ${"Renewal".padEnd(15)} ${"Available"}`);
+    lines.push(`${"-".repeat(70)}`);
+
+    const cfReg = cfResult?.pricing ? `$${cfResult.pricing.registration_cost}` : "—";
+    const cfRenew = cfResult?.pricing ? `$${cfResult.pricing.renewal_cost}` : "—";
+    lines.push(`${"Cloudflare".padEnd(20)} ${cfReg.padEnd(15)} ${cfRenew.padEnd(15)} ${cfAvailable ? "✅" : "❌"}`);
+
+    if (pbPrice) {
+        pbAvailable = true;
+        lines.push(
+            `${"Porkbun".padEnd(20)} $${pbPrice.registration.padEnd(14)} $${pbPrice.renewal.padEnd(14)} ✅`,
+        );
+    }
+
+    lines.push("");
+
+    // Status details
+    if (cfResult?.reason === "domain_premium") {
+        lines.push("**Note:** Premium domain — higher pricing applies");
+    } else if (cfResult?.reason === "extension_not_supported_via_api") {
+        lines.push("**Note:** CF supports this TLD via dashboard UI, but not API");
+        if (pbAvailable) lines.push("→ Use Porkbun API or register via CF dashboard");
+    } else if (cfResult?.reason === "extension_not_supported") {
+        lines.push("**Note:** CF Registrar doesn't support this TLD");
+        if (pbAvailable) lines.push("→ Use Porkbun for registration");
+    }
+
+    if (cfAvailable) {
+        lines.push(`\n**To register:** \`register_domain({ domain: "${domain}" })\``);
     }
 
     return textContent(lines.join("\n"));
