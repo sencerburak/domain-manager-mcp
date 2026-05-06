@@ -22,9 +22,17 @@ export async function listRegistrarDomains(): Promise<CFRegistrarDomain[]> {
 export async function getRegistrarDomain(domainName: string): Promise<CFRegistrarDomain | null> {
     const accountId = await getAccountId();
     try {
-        return await cfClient.get<CFRegistrarDomain>(
+        const result = await cfClient.get<CFRegistrarDomain>(
             `/accounts/${accountId}/registrar/domains/${encodeURIComponent(domainName)}`,
         );
+        // Defensive: ensure result actually has domain ownership indicators.
+        // If the domain is registered with CF Registrar, it will have a registered_at timestamp.
+        // If API returns empty object or template, registered_at will be null or undefined.
+        if (!result || !result.domain || result.registered_at == null) {
+            if (result) console.error(`[DEBUG] getRegistrarDomain(${domainName}): got result but registered_at is null/undefined:`, result);
+            return null;
+        }
+        return result;
     } catch (e) {
         if (e instanceof CFError && (e.status === 404 || e.code === 1224)) return null;
         throw e;
