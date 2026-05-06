@@ -2,12 +2,12 @@ import { z } from "zod";
 import { checkDomainsBatch } from "../../cloudflare/registrar.js";
 import { listZones } from "../../cloudflare/zones.js";
 import { getPorkbunPricing } from "../../porkbun/pricing.js";
-import { checkPorkbunDomainsBatch } from "../../porkbun/availability.js";
+import { checkRDAPBatch, RDAP_SUPPORTED_TLDS } from "../../rdap/client.js";
 import { textContent } from "../../types.js";
 
 export const name = "search_domains";
 export const description =
-    "Search for available domain names across multiple keywords and TLDs. Checks availability via Cloudflare Registrar API. For TLDs not fully supported by CF (e.g., .ai, .dev premium names), checks actual availability via Porkbun API (if PORKBUN_API_KEY/SECRET configured). Shows dual-provider availability and pricing comparison. Pass multiple keywords to check all at once instead of calling this tool repeatedly.";
+    "Search for available domain names across multiple keywords and TLDs. Uses RDAP (authoritative registry data) for availability where supported, Cloudflare Registrar for pricing. For TLDs without RDAP (.io, .co, .me etc.) uses CF availability signal with a warning. Pass multiple keywords to check all at once.";
 
 export const inputSchema = z.object({
     keywords: z
@@ -45,108 +45,78 @@ export async function handler(args: z.infer<typeof inputSchema>) {
     const cfResults = await checkDomainsBatch(toCheck);
     const cfMap = new Map(cfResults.map((r) => [r.name, r]));
 
-    // Identify domains to verify on Porkbun:
-    // 1. Domains where CF says unsupported TLD
-    // 2. Domains where CF says available (verify to catch false positives)
-    // Note: Porkbun rate limit is 1 check per 10 seconds per account.
-    // Cap at 3 total to avoid long waits (~33s max). For deeper checks use check_domain().
-    const pbCheckCandidates: string[] = [];
-    toCheck.forEach((d) => {
+    // RDAP batch check for domains where CF says available or premium,
+    // limited to TLDs with RDAP coverage. 150ms delay between requests.
+    const rdapCandidates = toCheck.filter((d) => {
+        const tld = d.split(".").slice(-1)[0];
+        if (!RDAP_SUPPORTED_TLDS.has(tld)) return false;
         const r = cfMap.get(d);
-        if (!r) return;
-        if (r.reason === "extension_not_supported_via_api" || r.reason === "extension_not_supported") {
-            pbCheckCandidates.push(d);
-        } else if (r.registrable) {
-            pbCheckCandidates.push(d);
-        }
+        if (!r) return false;
+        // Check all CF-available, CF-premium, and CF-unsupported-API domains
+        return r.registrable || r.reason === "domain_premium" || r.reason === "extension_not_supported_via_api";
     });
-    const pbCheckNeeded = pbCheckCandidates.slice(0, 3);
-
-    const pbAvailability = await checkPorkbunDomainsBatch(pbCheckNeeded);
+    const rdapResults = await checkRDAPBatch(rdapCandidates);
 
     type RowResult = {
         domain: string;
-        cfAvailable: boolean | null;
-        pbAvailable: boolean | null;
+        available: boolean | null;      // null = unknown
+        availableSource: string;        // "RDAP" | "CF" | "CF(unverified)" | "CF(no-RDAP)" | "unknown"
         owned: boolean;
         cfPrice?: string;
         pbPrice?: string;
-        reason?: string;
-        verified?: boolean; // true if Porkbun verified the availability
+        takenBy?: string;               // registrar from RDAP if taken
+        note?: string;
     };
     const results: RowResult[] = allDomains.map((domain) => {
-        if (ownedZones.has(domain)) return { domain, cfAvailable: false, pbAvailable: false, owned: true };
+        if (ownedZones.has(domain)) return { domain, available: false, availableSource: "owned", owned: true };
 
         const r = cfMap.get(domain);
         const tld = domain.split(".").slice(-1)[0];
         const pb = pbPricing.get(tld);
-        const pbAvail = pbAvailability.get(domain);
+        const rdap = rdapResults.get(domain);
+        const hasRdap = RDAP_SUPPORTED_TLDS.has(tld);
 
-        let cfAvailable: boolean | null = null;
-        let pbAvailableResult: boolean | null = null;
+        let available: boolean | null = null;
+        let availableSource = "unknown";
         let cfPrice: string | undefined;
         let pbPrice: string | undefined;
-        let reason: string | undefined;
-        let verified = false;
+        let takenBy: string | undefined;
+        let note: string | undefined;
 
-        if (!r) {
-            cfAvailable = null;
-        } else if (r.registrable) {
-            cfAvailable = true;
-            if (r.pricing) cfPrice = `$${r.pricing.registration_cost}`;
-            // If Porkbun says otherwise, trust Porkbun
-            if (pbAvail) {
-                pbAvailableResult = pbAvail.available ? true : false;
-                pbPrice = pbAvail.registration ? `$${pbAvail.registration}` : pb ? `$${pb.registration}` : undefined;
-                verified = true;
-                // If Porkbun contradicts CF, downgrade CF status
-                if (!pbAvail.available) {
-                    cfAvailable = false;
-                    reason = "CF mismatch — Porkbun shows taken";
-                }
-            }
-        } else if (r.reason === "domain_unavailable") {
-            cfAvailable = false;
-        } else if (r.reason === "extension_not_supported_via_api" || r.reason === "extension_not_supported") {
-            cfAvailable = null;
-            reason =
-                r.reason === "extension_not_supported_via_api"
-                    ? "CF API unsupported"
-                    : "TLD not in CF";
-            // Fall back to Porkbun availability if we have it
-            if (pbAvail) {
-                pbAvailableResult = pbAvail.available ? true : false;
-                pbPrice = pbAvail.registration ? `$${pbAvail.registration}` : pb ? `$${pb.registration}` : undefined;
-                verified = true;
-            } else if (pb) {
-                pbPrice = `$${pb.registration}`;
-            }
-        } else if (r.reason === "domain_premium") {
-            cfAvailable = true;
+        if (pb) pbPrice = `$${pb.registration}`;
+
+        if (r?.pricing) cfPrice = `$${r.pricing.registration_cost}`;
+
+        // RDAP is authoritative for supported TLDs
+        if (rdap !== undefined) {
+            available = !rdap.registered;
+            availableSource = "RDAP";
+            if (rdap.registered) takenBy = rdap.registrar;
+        } else if (r?.reason === "domain_unavailable") {
+            available = false;
+            availableSource = "CF";
+        } else if (r?.registrable) {
+            available = true;
+            availableSource = hasRdap ? "CF(RDAP-err)" : "CF(no-RDAP)";
+            if (!hasRdap) note = "unverified";
+        } else if (r?.reason === "domain_premium") {
+            // CF says premium — but RDAP doesn't cover this TLD (or RDAP lookup wasn't attempted).
+            // Premium domains are almost always registered. Treat as unknown but flag it.
+            available = null;
+            availableSource = "CF";
+            note = "premium — verify manually";
             if (r.pricing) cfPrice = `$${r.pricing.registration_cost}*`;
-            // Verify premium domains on Porkbun too
-            if (pbAvail) {
-                pbAvailableResult = pbAvail.available ? true : false;
-                pbPrice = pbAvail.registration ? `$${pbAvail.registration}` : pb ? `$${pb.registration}` : undefined;
-                verified = true;
-            }
+        } else if (r?.reason === "extension_not_supported_via_api") {
+            available = null;
+            availableSource = "CF";
+            note = "CF API unsupported TLD";
+        } else if (r?.reason === "extension_not_supported") {
+            available = null;
+            availableSource = "CF";
+            note = "TLD not in CF";
         }
 
-        // If CF had no issue but we didn't get Porkbun data, use pricing as reference
-        if (!verified && !pbPrice && pb) {
-            pbPrice = `$${pb.registration}`;
-        }
-
-        return {
-            domain,
-            cfAvailable,
-            pbAvailable: pbAvailableResult,
-            owned: false,
-            cfPrice,
-            pbPrice,
-            reason,
-            verified,
-        };
+        return { domain, available, availableSource, owned: false, cfPrice, pbPrice, takenBy, note };
     });
 
     const lines: string[] = [
@@ -159,94 +129,68 @@ export async function handler(args: z.infer<typeof inputSchema>) {
     for (const kw of keywords) {
         const kwResults = results.filter((r) => r.domain.startsWith(`${kw}.`));
         if (grouped) {
-            const avail = kwResults.filter(
-                (r) => (r.cfAvailable === true || r.pbAvailable === true) && !r.owned,
-            ).length;
+            const avail = kwResults.filter((r) => r.available === true && !r.owned).length;
             lines.push(`### "${kw}" — ${avail} available`);
         }
 
-        // Check if any have Porkbun availability data
-        const hasPorkbunAvail = kwResults.some((r) => r.pbAvailable !== null && r.pbAvailable !== undefined);
-
-        if (hasPorkbunAvail) {
-            lines.push(
-                `${"Domain".padEnd(25)} ${"CF".padEnd(12)} ${"PB".padEnd(12)} ${"CF Price".padEnd(13)} ${"PB Price"}`,
-            );
-        } else {
-            lines.push(
-                `${"Domain".padEnd(25)} ${"Status".padEnd(18)} ${"CF Price".padEnd(13)} ${"PB Ref Price"}`,
-            );
-        }
+        lines.push(`${"Domain".padEnd(25)} ${"Status".padEnd(20)} ${"CF Price".padEnd(13)} ${"PB Ref Price"}`);
         lines.push(`${"-".repeat(80)}`);
 
         for (const r of kwResults) {
-            if (args.available_only && !r.owned && r.cfAvailable !== true && r.pbAvailable !== true) continue;
+            if (args.available_only && !r.owned && r.available !== true) continue;
 
-            if (hasPorkbunAvail) {
-                const cfStatus = r.owned
-                    ? "yours"
-                    : r.cfAvailable === true
-                        ? "avail ✅"
-                        : r.cfAvailable === false
-                            ? "taken ❌"
-                            : "unknown ❓";
-
-                const pbStatus = r.pbAvailable === true ? "avail ✅" : r.pbAvailable === false ? "taken ❌" : "-";
-
-                const cfPrice = r.cfPrice ? r.cfPrice : r.reason ? `(${r.reason})` : "-";
-                const pbPrice = r.pbPrice ? r.pbPrice : "-";
-
-                lines.push(
-                    `${r.domain.padEnd(25)} ${cfStatus.padEnd(12)} ${pbStatus.padEnd(12)} ${cfPrice.padEnd(13)} ${pbPrice}`,
-                );
+            let status: string;
+            if (r.owned) {
+                status = "yours ✅";
+            } else if (r.available === true) {
+                const suffix = r.availableSource === "CF(no-RDAP)" ? " ⚠️" : "";
+                status = `available ✅${suffix}`;
+            } else if (r.available === false) {
+                status = r.takenBy ? `taken ❌ (${r.takenBy.split(" ")[0]})` : "taken ❌";
             } else {
-                const cfStatus = r.owned
-                    ? "yours ✅"
-                    : r.cfAvailable === true
-                        ? "available ✅"
-                        : r.cfAvailable === false
-                            ? "taken ❌"
-                            : "unknown ❓";
-
-                const cfPrice = r.cfPrice ? r.cfPrice : r.reason ? `(${r.reason})` : "-";
-                const pbPrice = r.pbPrice ? r.pbPrice : "-";
-
-                lines.push(
-                    `${r.domain.padEnd(25)} ${cfStatus.padEnd(18)} ${cfPrice.padEnd(13)} ${pbPrice}`,
-                );
+                // null = unknown
+                status = r.note ? `? (${r.note})` : "unknown ❓";
             }
+
+            // Truncate long status for table alignment
+            if (status.length > 18) status = status.substring(0, 17) + "…";
+
+            const cfPrice = r.cfPrice ?? "-";
+            const pbPrice = r.pbPrice ?? "-";
+
+            lines.push(
+                `${r.domain.padEnd(25)} ${status.padEnd(20)} ${cfPrice.padEnd(13)} ${pbPrice}`,
+            );
         }
         lines.push("");
     }
 
-    const cfAvailable = results.filter(
-        (r) => r.cfAvailable === true && !r.owned,
+    const totalAvailable = results.filter((r) => r.available === true && !r.owned);
+    const rdapVerified = results.filter(
+        (r) => r.available === true && r.availableSource === "RDAP",
     );
-    const pbAvailable = results.filter(
-        (r) => r.pbAvailable === true && !r.owned,
-    );
-    const totalAvailable = results.filter(
-        (r) => (r.cfAvailable === true || r.pbAvailable === true) && !r.owned,
+    const unverified = results.filter(
+        (r) => r.available === true && r.availableSource !== "RDAP",
     );
 
     lines.push(
-        `**Summary:** ${totalAvailable.length}/${results.length} available (${cfAvailable.length} CF, ${pbAvailable.length} Porkbun)`,
+        `**Summary:** ${totalAvailable.length}/${results.length} available` +
+        (rdapVerified.length ? ` (${rdapVerified.length} RDAP-verified` : "") +
+        (unverified.length ? `, ${unverified.length} unverified` : "") +
+        (rdapVerified.length ? ")" : ""),
     );
 
-    if (cfAvailable.length > 0) {
-        const first = cfAvailable[0];
-        lines.push(`\nCF available: \`register_domain({ domain: "${first.domain}" })\``);
-    }
-    if (pbAvailable.length > 0 && pbAvailable.some((r) => !cfAvailable.find((c) => c.domain === r.domain))) {
-        const first = pbAvailable.find((r) => !cfAvailable.find((c) => c.domain === r.domain));
-        if (first) {
-            lines.push(`Porkbun available: \`${first.domain}\` - register at https://porkbun.com`);
-        }
+    const cfRegistrable = results.filter(
+        (r) => r.available === true && !r.owned && cfMap.get(r.domain)?.registrable,
+    );
+    if (cfRegistrable.length > 0) {
+        lines.push(`\nCF registrable: \`register_domain({ domain: "${cfRegistrable[0].domain}" })\``);
     }
 
-    lines.push(
-        `\n*Note: Porkbun rate limit is 1 check/10s — only first ${pbCheckNeeded.length} candidates verified. Use check_domain() for full per-domain Porkbun check.*`,
-    );
+    const noRdapTlds = [...new Set(tlds.filter((t) => !RDAP_SUPPORTED_TLDS.has(t)))];
+    if (noRdapTlds.length > 0) {
+        lines.push(`\n*⚠️  No RDAP for: .${noRdapTlds.join(", .")} — availability unverified for those TLDs. Use check_domain() for a deeper check.*`);
+    }
 
     return textContent(lines.join("\n"));
 }
