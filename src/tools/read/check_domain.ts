@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { getZoneByName } from "../../cloudflare/zones.js";
-import { getRegistrarDomain, checkDomainsBatch, getTLDPolicies } from "../../cloudflare/registrar.js";
+import { getRegistrarDomain, checkDomainsBatch } from "../../cloudflare/registrar.js";
 import { textContent } from "../../types.js";
 
 export const name = "check_domain";
@@ -47,16 +47,6 @@ export async function handler(args: z.infer<typeof inputSchema>) {
         lines.push(`**Zone status:** ${zone.status}`);
         lines.push(`**Plan:** ${zone.plan.name}`);
         lines.push(`**Nameservers:** ${zone.name_servers.join(", ")}`);
-        try {
-            const tld = apex.split(".").slice(1).join(".");
-            const policies = await getTLDPolicies([tld]);
-            if (policies.length > 0) {
-                lines.push(
-                    `**Transfer to CF:** $${policies[0].transfer_fee}  ` +
-                    `| Renewal at CF: $${policies[0].renewal_fee}/yr`,
-                );
-            }
-        } catch { /* pricing optional */ }
         return textContent(lines.join("\n"));
     }
 
