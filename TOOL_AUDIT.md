@@ -253,14 +253,14 @@ batch_check_domains({
 
 ## SUMMARY
 
-| Category | Status | Notes |
-|----------|--------|-------|
-| **Core Functionality** | ✅ | All essential operations working |
-| **Error Handling** | ✅ | Good validation and error messages |
-| **API Integration** | ✅ | Proper Cloudflare API usage (except get_tld_pricing hack) |
-| **Documentation** | ✅ | Descriptions are clear and actionable |
-| **Security** | ✅ | Write operations have good confirmation output |
-| **Performance** | 🟡 | get_tld_pricing uses inefficient dummy-domain approach |
-| **Completeness** | 🟡 | Missing: transfers, nameserver management, contact updates |
+| Category               | Status | Notes                                                      |
+| ---------------------- | ------ | ---------------------------------------------------------- |
+| **Core Functionality** | ✅      | All essential operations working                           |
+| **Error Handling**     | ✅      | Good validation and error messages                         |
+| **API Integration**    | ✅      | Proper Cloudflare API usage (except get_tld_pricing hack)  |
+| **Documentation**      | ✅      | Descriptions are clear and actionable                      |
+| **Security**           | ✅      | Write operations have good confirmation output             |
+| **Performance**        | 🟡      | get_tld_pricing uses inefficient dummy-domain approach     |
+| **Completeness**       | 🟡      | Missing: transfers, nameserver management, contact updates |
 
 **Recommended Action:** Refactor `get_tld_pricing` → everything else is solid.
