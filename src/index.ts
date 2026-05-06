@@ -3,6 +3,24 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import http from "http";
+import { readFileSync } from "fs";
+import { join } from "path";
+
+// Logging utility with timestamp and level
+function log(level: string, message: string, meta?: Record<string, unknown>) {
+    const timestamp = new Date().toISOString();
+    const metaStr = meta ? ` ${JSON.stringify(meta)}` : "";
+    console.error(`[${timestamp}] [${level}] ${message}${metaStr}`);
+}
+
+// Read package.json for version
+let VERSION = "unknown";
+try {
+    const pkg = JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf-8")) as { version: string };
+    VERSION = pkg.version;
+} catch {
+    /* fall back to unknown */
+}
 
 // Read tools
 import * as checkDomain from "./tools/read/check_domain.js";
@@ -25,7 +43,7 @@ const readTools = [checkDomain, searchDomains, listDomains, getDomain, getDnsRec
 const writeTools = [registerDomain, renewDomain, updateDomainSettings, createDnsRecord, updateDnsRecord, deleteDnsRecord];
 
 function createMcpServer() {
-    const server = new McpServer({ name: "domain-manager", version: "1.8.0" });
+    const server = new McpServer({ name: "domain-manager", version: VERSION });
     for (const tool of readTools) {
         server.registerTool(tool.name, { description: tool.description, inputSchema: tool.inputSchema }, tool.handler);
     }
@@ -36,6 +54,24 @@ function createMcpServer() {
 }
 
 async function main() {
+    // Startup logging
+    log("INFO", "domain-manager-mcp starting", { version: VERSION });
+
+    // Check environment
+    const cfToken = process.env.CLOUDFLARE_API_TOKEN;
+    const httpProxy = process.env.HTTP_PROXY;
+    const httpsProxy = process.env.HTTPS_PROXY;
+
+    if (!cfToken) {
+        log("WARN", "CLOUDFLARE_API_TOKEN not set — Cloudflare tools will fail");
+    } else {
+        log("INFO", "CLOUDFLARE_API_TOKEN configured", { token_length: cfToken.length });
+    }
+
+    if (httpProxy || httpsProxy) {
+        log("INFO", "HTTP proxy configured", { http: !!httpProxy, https: !!httpsProxy });
+    }
+
     const port = process.env.PORT ? parseInt(process.env.PORT, 10) : null;
 
     if (port) {
@@ -69,13 +105,15 @@ async function main() {
         });
 
         httpServer.listen(port, "0.0.0.0", () => {
-            process.stderr.write(`domain-manager MCP server (HTTP) listening on :${port}\n`);
+            log("INFO", "domain-manager MCP server listening (HTTP)", { port, address: "0.0.0.0" });
+            log("INFO", "Ready to accept connections", { endpoint: `http://0.0.0.0:${port}/mcp` });
         });
 
         // Keep running until killed
         await new Promise(() => { });
     } else {
         // stdio mode — local binary (existing behaviour)
+        log("INFO", "domain-manager MCP server ready (stdio mode)");
         const transport = new StdioServerTransport();
         const server = createMcpServer();
         await server.connect(transport);
@@ -83,6 +121,6 @@ async function main() {
 }
 
 main().catch((e) => {
-    console.error("Fatal:", e);
+    log("ERROR", "Fatal error", { error: String(e), stack: e instanceof Error ? e.stack : undefined });
     process.exit(1);
 });
