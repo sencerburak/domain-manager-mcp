@@ -62,20 +62,20 @@ export async function registerDomain(
     try {
         const accountId = await getAccountId();
         console.log(`[Registrar] Got account ID: ${accountId}`);
-        
+
         const body: Record<string, unknown> = {
             name: domainName,
             auto_renew: opts.auto_renew ?? true,
             privacy: opts.privacy ?? false,
         };
         if (opts.years) body.years = opts.years;
-        
+
         console.log(`[Registrar] Calling POST /accounts/${accountId}/registrar/domains with:`, JSON.stringify(body));
         const result = await cfClient.post<CFRegistrarDomain>(
             `/accounts/${accountId}/registrar/domains`,
             body,
         );
-        console.log(`[Registrar] Domain registered successfully:`, result.name, `expires: ${result.expires_at}`);
+        console.log(`[Registrar] Domain registered successfully:`, result.domain, `expires: ${result.expires_at}`);
         return result;
     } catch (err) {
         console.error(`[Registrar] Error registering domain:`, err instanceof Error ? err.message : String(err));
