@@ -42,3 +42,40 @@ jobs:
                   tags: ${{ steps.meta.outputs.tags }}
                   cache-from: type=registry,ref=ghcr.io/sencerburak/domain-manager-mcp:latest
                   cache-to: type=inline
+
+    deploy:
+        if: github.ref == 'refs/heads/main'
+        needs: docker
+        runs-on: ubuntu-latest
+        steps:
+            - name: Deploy via Komodo API
+              env:
+                  KOMODO_BASE: "https://komodo.motorama.app"
+                  KOMODO_API_KEY: ${{ secrets.KOMODO_API_KEY }}
+                  KOMODO_API_SECRET: ${{ secrets.KOMODO_API_SECRET }}
+              run: |
+                  if [ -z "$KOMODO_API_KEY" ] || [ -z "$KOMODO_API_SECRET" ]; then
+                    echo "⚠️  WARNING: KOMODO_API_KEY and KOMODO_API_SECRET secrets not configured"
+                    echo "    domain-manager-mcp image is built and pushed to GHCR, but stack won't auto-redeploy"
+                    echo ""
+                    echo "    To enable auto-deploy:"
+                    echo "    1. In Komodo UI (https://komodo.motorama.app), ensure a service user with Execute"
+                    echo "       permission on the 'agents' stack exists. Use github-actions or create new."
+                    echo "    2. Add to domain-manager-mcp repo secrets:"
+                    echo "       - KOMODO_API_KEY"
+                    echo "       - KOMODO_API_SECRET"
+                    exit 0
+                  fi
+                  echo "Triggering Komodo agents stack redeploy..."
+                  response=$(curl -s -X POST "$KOMODO_BASE/execute" \
+                    -H "X-Api-Key: $KOMODO_API_KEY" \
+                    -H "X-Api-Secret: $KOMODO_API_SECRET" \
+                    -H "Content-Type: application/json" \
+                    -d '{"type":"DeployStack","params":{"stack":"agents"}}')
+                  echo "$response" | jq .
+                  if echo "$response" | jq -e '.error' > /dev/null 2>&1; then
+                    echo "ERROR: Komodo API returned error"
+                    exit 1
+                  fi
+                  echo "✅ Stack redeploy triggered successfully"
+
