@@ -45,13 +45,24 @@ export async function handler(args: z.infer<typeof inputSchema>) {
     const cfResults = await checkDomainsBatch(toCheck);
     const cfMap = new Map(cfResults.map((r) => [r.name, r]));
 
-    // Identify domains where CF returned unsupported TLD errors, check those on Porkbun
-    const pbCheckNeeded = toCheck.filter((d) => {
+    // Identify domains to verify on Porkbun:
+    // 1. Domains where CF says unsupported TLD
+    // 2. Domains where CF says available (verify against false positives)
+    const pbCheckNeeded = new Set<string>();
+    toCheck.forEach((d) => {
         const r = cfMap.get(d);
-        return r && (r.reason === "extension_not_supported_via_api" || r.reason === "extension_not_supported");
+        if (!r) return; // No CF data
+        // Check unsupported TLDs
+        if (r.reason === "extension_not_supported_via_api" || r.reason === "extension_not_supported") {
+            pbCheckNeeded.add(d);
+        }
+        // Also verify domains CF claims are available (catch false positives)
+        if (r.registrable) {
+            pbCheckNeeded.add(d);
+        }
     });
 
-    const pbAvailability = await checkPorkbunDomainsBatch(pbCheckNeeded);
+    const pbAvailability = await checkPorkbunDomainsBatch(Array.from(pbCheckNeeded));
 
     type RowResult = {
         domain: string;
@@ -61,6 +72,7 @@ export async function handler(args: z.infer<typeof inputSchema>) {
         cfPrice?: string;
         pbPrice?: string;
         reason?: string;
+        verified?: boolean; // true if Porkbun verified the availability
     };
     const results: RowResult[] = allDomains.map((domain) => {
         if (ownedZones.has(domain)) return { domain, cfAvailable: false, pbAvailable: false, owned: true };
@@ -75,12 +87,24 @@ export async function handler(args: z.infer<typeof inputSchema>) {
         let cfPrice: string | undefined;
         let pbPrice: string | undefined;
         let reason: string | undefined;
+        let verified = false;
 
         if (!r) {
             cfAvailable = null;
         } else if (r.registrable) {
             cfAvailable = true;
             if (r.pricing) cfPrice = `$${r.pricing.registration_cost}`;
+            // If Porkbun says otherwise, trust Porkbun
+            if (pbAvail) {
+                pbAvailableResult = pbAvail.available ? true : false;
+                pbPrice = pbAvail.registration ? `$${pbAvail.registration}` : pb ? `$${pb.registration}` : undefined;
+                verified = true;
+                // If Porkbun contradicts CF, downgrade CF status
+                if (!pbAvail.available) {
+                    cfAvailable = false;
+                    reason = "CF mismatch — Porkbun shows taken";
+                }
+            }
         } else if (r.reason === "domain_unavailable") {
             cfAvailable = false;
         } else if (r.reason === "extension_not_supported_via_api" || r.reason === "extension_not_supported") {
@@ -93,16 +117,23 @@ export async function handler(args: z.infer<typeof inputSchema>) {
             if (pbAvail) {
                 pbAvailableResult = pbAvail.available ? true : false;
                 pbPrice = pbAvail.registration ? `$${pbAvail.registration}` : pb ? `$${pb.registration}` : undefined;
+                verified = true;
             } else if (pb) {
                 pbPrice = `$${pb.registration}`;
             }
         } else if (r.reason === "domain_premium") {
             cfAvailable = true;
             if (r.pricing) cfPrice = `$${r.pricing.registration_cost}*`;
+            // Verify premium domains on Porkbun too
+            if (pbAvail) {
+                pbAvailableResult = pbAvail.available ? true : false;
+                pbPrice = pbAvail.registration ? `$${pbAvail.registration}` : pb ? `$${pb.registration}` : undefined;
+                verified = true;
+            }
         }
 
         // If CF had no issue but we didn't get Porkbun data, use pricing as reference
-        if (!pbAvail && !pbPrice && pb) {
+        if (!verified && !pbPrice && pb) {
             pbPrice = `$${pb.registration}`;
         }
 
@@ -114,6 +145,7 @@ export async function handler(args: z.infer<typeof inputSchema>) {
             cfPrice,
             pbPrice,
             reason,
+            verified,
         };
     });
 

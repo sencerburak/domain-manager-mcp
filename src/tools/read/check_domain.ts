@@ -62,10 +62,23 @@ export async function handler(args: z.infer<typeof inputSchema>) {
     // Determine status
     let status = "Unknown ❓";
     let cfAvailable = false;
+    let verified = false;
 
     if (cfResult?.registrable) {
-        status = "Available for registration ✅";
         cfAvailable = true;
+        // Verify with Porkbun if available
+        if (pbAvailability) {
+            verified = true;
+            if (!pbAvailability.available) {
+                // Porkbun says it's taken — trust Porkbun
+                cfAvailable = false;
+                status = "Registered (taken) ❌ — CF/PB mismatch";
+            } else {
+                status = "Available for registration ✅ (verified)";
+            }
+        } else {
+            status = "Available for registration ✅";
+        }
     } else if (cfResult?.reason === "domain_unavailable") {
         status = "Registered (taken) ❌";
     } else if (cfResult?.reason === "extension_not_supported_via_api" || cfResult?.reason === "extension_not_supported") {

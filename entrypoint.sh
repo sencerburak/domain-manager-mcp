@@ -1,7 +1,8 @@
 #!/bin/sh
 set -e
 
-echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] [INFO] domain-manager-mcp starting"
+VERSION=$(grep '"version"' package.json | head -1 | sed 's/.*"version": "\([^"]*\)".*/\1/')
+echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] [INFO] domain-manager-mcp v${VERSION} starting"
 
 # Show environment
 if [ -n "$PORT" ]; then
