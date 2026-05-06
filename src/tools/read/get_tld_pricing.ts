@@ -1,10 +1,10 @@
 import { z } from "zod";
-import { checkDomainsBatch } from "../../cloudflare/registrar.js";
+import { getTLDPolicies } from "../../cloudflare/registrar.js";
 import { textContent } from "../../types.js";
 
 export const name = "get_tld_pricing";
 export const description =
-    "Get Cloudflare Registrar pricing for TLDs. Shows registration and renewal fees. Use this before registering a domain to confirm pricing.";
+    "Get Cloudflare Registrar pricing for TLDs. Shows registration and renewal fees, grace period, and max years. Use this before registering a domain to confirm pricing.";
 
 export const inputSchema = z.object({
     tlds: z
@@ -15,48 +15,45 @@ export const inputSchema = z.object({
         .describe("TLDs to get pricing for (without dot), e.g. ['com', 'io', 'app']"),
 });
 
-// Dummy name unlikely to be registered, used only to probe pricing
-const DUMMY = "xyzpricingprobe98765";
-
 export async function handler(args: z.infer<typeof inputSchema>) {
     const tlds = args.tlds.map((t) => t.toLowerCase().replace(/^\./, ""));
 
-    // Use domain-check with a dummy domain name to get per-TLD pricing
-    const domains = tlds.map((tld) => `${DUMMY}.${tld}`);
-    const results = await checkDomainsBatch(domains);
+    // Query TLD policies directly from CF Registrar API (no dummy domain needed)
+    const policies = await getTLDPolicies(tlds);
 
     const lines: string[] = [
-        `## Cloudflare Registrar Pricing\n`,
-        `${"TLD".padEnd(12)} ${"Supported".padEnd(12)} ${"Register".padEnd(12)} ${"Renew".padEnd(10)}`,
-        "-".repeat(50),
+        `## Cloudflare Registrar Pricing (${policies.length} TLD${policies.length === 1 ? "" : "s"})\n`,
+        `${"TLD".padEnd(12)} ${"Register".padEnd(12)} ${"Renew".padEnd(12)} ${"Max Yrs".padEnd(10)} Grace (days)`,
+        "-".repeat(60),
     ];
 
-    const resultMap = new Map(results.map((r) => [r.name.replace(`${DUMMY}.`, ""), r]));
-    for (const tld of tlds) {
-        const r = resultMap.get(tld);
-        if (!r) {
-            lines.push(`${"." + tld.padEnd(11)} ${"unknown".padEnd(12)} -`);
-            continue;
-        }
-        if (r.registrable && r.pricing) {
-            const reg = `$${r.pricing.registration_cost}`;
-            const renew = `$${r.pricing.renewal_cost}`;
-            const note = r.tier === "premium" ? " (premium)" : "";
-            lines.push(`${"." + tld.padEnd(11)} ${"✅ yes".padEnd(12)} ${reg.padEnd(12)} ${renew}${note}`);
-        } else if (r.reason === "extension_not_supported_via_api") {
-            lines.push(`${"." + tld.padEnd(11)} ${"⚠️ dashboard".padEnd(12)} register via CF web UI`);
-        } else if (r.reason === "extension_not_supported") {
-            lines.push(`${"." + tld.padEnd(11)} ${"❌ no".padEnd(12)} -`);
-        } else if (r.reason === "domain_unavailable") {
-            // dummy name was taken — try different dummy or report as unknown pricing
-            lines.push(`${"." + tld.padEnd(11)} ${"✅ yes".padEnd(12)} pricing unavailable (retry)`);
+    for (const policy of policies.sort((a, b) => a.tld.localeCompare(b.tld))) {
+        if (policy.supported) {
+            const reg = `$${policy.registration_fee}`;
+            const renew = `$${policy.renewal_fee}`;
+            const maxYears = `${policy.max_registration_years}`;
+            const grace = `${policy.grace_period}`;
+            lines.push(
+                `${"." + policy.tld.padEnd(11)} ${reg.padEnd(12)} ${renew.padEnd(12)} ${maxYears.padEnd(10)} ${grace}`,
+            );
         } else {
-            lines.push(`${"." + tld.padEnd(11)} ${"❓ unknown".padEnd(12)} -`);
+            lines.push(`${"." + policy.tld.padEnd(11)} ${"❌ unsupported".padEnd(12)} - - -`);
         }
     }
 
-    const supported = results.filter((r) => r.registrable || r.reason === "extension_not_supported_via_api").length;
-    lines.push(`\n*${supported}/${tlds.length} TLDs supported via Cloudflare Registrar*`);
+    // Show TLDs that weren't in policies (may be unsupported or API didn't return them)
+    const policySet = new Set(policies.map((p) => p.tld.toLowerCase()));
+    const missing = tlds.filter((t) => !policySet.has(t.toLowerCase()));
+    if (missing.length > 0) {
+        lines.push("");
+        lines.push("**Not found in Registrar:**");
+        for (const tld of missing) {
+            lines.push(`- .${tld} (may be unsupported or require dashboard registration)`);
+        }
+    }
+
+    const supported = policies.filter((p) => p.supported).length;
+    lines.push(`\n*${supported}/${policies.length} TLDs supported via Cloudflare Registrar API*`);
 
     return textContent(lines.join("\n"));
 }
