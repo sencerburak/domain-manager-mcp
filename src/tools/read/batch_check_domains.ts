@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { getZoneByName } from "../../cloudflare/zones.js";
 import { getRegistrarDomain, checkDomainsBatch } from "../../cloudflare/registrar.js";
+import { getPorkbunPricing } from "../../porkbun/pricing.js";
 import { textContent } from "../../types.js";
 
 export const name = "batch_check_domains";
@@ -24,6 +25,7 @@ type CheckResult = {
     domain: string;
     status: "owned" | "zone" | "available" | "taken" | "unknown" | "unsupported";
     notes?: string;
+    porkbunPrice?: string;
 };
 
 export async function handler(args: z.infer<typeof inputSchema>) {
@@ -71,6 +73,9 @@ export async function handler(args: z.infer<typeof inputSchema>) {
     const cfMap = new Map(cfResults.map((r) => [r.name, r]));
     console.error(`[DEBUG] cfResults count: ${cfResults.length}`);
 
+    // Fetch Porkbun pricing for all checked TLDs (public endpoint, no auth needed)
+    const pbPricing = await getPorkbunPricing(normalizedTlds);
+
     // 3. Merge
     for (const domain of allDomains) {
         if (ownershipResults.has(domain)) {
@@ -88,7 +93,15 @@ export async function handler(args: z.infer<typeof inputSchema>) {
         } else if (r.reason === "domain_unavailable") {
             results.push({ domain, status: "taken" });
         } else if (r.reason === "extension_not_supported" || r.reason === "extension_not_supported_via_api") {
-            results.push({ domain, status: "unsupported", notes: r.reason === "extension_not_supported_via_api" ? "available via CF dashboard" : "TLD not in CF Registrar" });
+            const tld = domain.split(".").slice(1).join(".");
+            const pb = pbPricing.get(tld);
+            const porkbunNote = pb ? `Porkbun: $${pb.registration}/yr` : undefined;
+            results.push({
+                domain,
+                status: "unsupported",
+                notes: r.reason === "extension_not_supported_via_api" ? "available via CF dashboard" : "TLD not in CF Registrar",
+                porkbunPrice: porkbunNote,
+            });
         } else if (r.reason === "domain_premium") {
             const price = r.pricing ? ` — $${r.pricing.registration_cost} ${r.pricing.currency}/yr` : "";
             results.push({ domain, status: "available", notes: `premium${price}` });
@@ -132,7 +145,10 @@ export async function handler(args: z.infer<typeof inputSchema>) {
     }
     if (byStatus.unsupported.length > 0) {
         lines.push("### ⚠️ TLD Not Supported by CF Registrar API");
-        for (const r of byStatus.unsupported) lines.push(`- **${r.domain}** ${r.notes ? `(${r.notes})` : ""}`);
+        for (const r of byStatus.unsupported) {
+            const pb = r.porkbunPrice ? ` · ${r.porkbunPrice}` : "";
+            lines.push(`- **${r.domain}** ${r.notes ? `(${r.notes}${pb})` : pb || ""}`);
+        }
         lines.push("");
     }
     if (byStatus.unknown.length > 0) {

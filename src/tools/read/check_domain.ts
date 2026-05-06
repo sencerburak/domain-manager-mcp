@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { getZoneByName } from "../../cloudflare/zones.js";
 import { getRegistrarDomain, checkDomainsBatch } from "../../cloudflare/registrar.js";
+import { getPorkbunPricing } from "../../porkbun/pricing.js";
 import { textContent } from "../../types.js";
 
 export const name = "check_domain";
@@ -73,9 +74,21 @@ export async function handler(args: z.infer<typeof inputSchema>) {
     } else if (result.reason === "extension_not_supported_via_api") {
         lines.push("**Status:** TLD available via Cloudflare dashboard (not API) ⚠️");
         lines.push("*This TLD can be registered through the CF Registrar web UI but not programmatically.*");
+        const tld = apex.split(".").slice(1).join(".");
+        const pbPricing = await getPorkbunPricing([tld]);
+        const pb = pbPricing.get(tld);
+        if (pb) lines.push(`**Porkbun pricing:** reg $${pb.registration}/yr · renew $${pb.renewal}/yr`);
     } else if (result.reason === "extension_not_supported") {
         lines.push("**Status:** TLD not supported by Cloudflare Registrar ⚠️");
-        lines.push("*Check porkbun.com or namecheap.com to register this TLD.*");
+        const tld = apex.split(".").slice(1).join(".");
+        const pbPricing = await getPorkbunPricing([tld]);
+        const pb = pbPricing.get(tld);
+        if (pb) {
+            lines.push(`**Porkbun pricing:** reg $${pb.registration}/yr · renew $${pb.renewal}/yr`);
+            lines.push(`*Register at porkbun.com or use \`register_domain\` if Porkbun is configured.*`);
+        } else {
+            lines.push("*Check porkbun.com or namecheap.com to register this TLD.*");
+        }
     } else if (result.reason === "domain_premium") {
         lines.push("**Status:** Available (premium domain) ✅");
         if (result.pricing) {
