@@ -5,27 +5,25 @@ import { textContent } from "../../types.js";
 
 export const name = "search_domains";
 export const description =
-    "Search for available domain names for a keyword across multiple TLDs. Checks RDAP for availability and Cloudflare Registrar for pricing. Rate-limited to ~2 checks/sec to be respectful.";
+    "Search for available domain names for one or more keywords across multiple TLDs. Checks RDAP for availability and Cloudflare Registrar for pricing. Pass multiple keywords to check all at once instead of calling this tool repeatedly.";
 
 export const inputSchema = z.object({
-    keyword: z
-        .string()
-        .min(1)
-        .max(63)
-        .describe("Keyword or brand name to search (without TLD), e.g. 'myapp' or 'acme'"),
+    keywords: z
+        .union([z.string().min(1).max(63), z.array(z.string().min(1).max(63)).min(1).max(20)])
+        .describe("Keyword(s) or brand name(s) to search (without TLD), e.g. 'myapp' or ['myapp', 'mysite', 'mybrand']. Pass multiple to check all at once."),
     tlds: z
         .array(z.string().regex(/^[a-z]{2,}$/i))
         .min(1)
-        .max(15)
+        .max(20)
         .default(["com", "net", "org", "io", "co", "app", "dev", "ai", "xyz", "me"])
-        .describe("TLDs to check. Defaults to 10 popular ones. Max 15."),
+        .describe("TLDs to check. Defaults to 10 popular ones. Max 20."),
     available_only: z.boolean().default(false).describe("Only show available domains"),
 });
 
-const DELAY_MS = 500; // Respectful RDAP rate limiting
-
 export async function handler(args: z.infer<typeof inputSchema>) {
-    const keyword = args.keyword.toLowerCase().trim();
+    // Normalize: keywords can be string or array
+    const keywords = (Array.isArray(args.keywords) ? args.keywords : [args.keywords])
+        .map((k) => k.toLowerCase().trim());
     const tlds = args.tlds.map((t) => t.toLowerCase().replace(/^\./, ""));
 
     // Pre-fetch user's existing zones for instant "owned" status
@@ -48,48 +46,66 @@ export async function handler(args: z.infer<typeof inputSchema>) {
         /* non-fatal */
     }
 
+    // Check all keyword × TLD combinations in parallel (max 10 concurrent)
+    const allDomains = keywords.flatMap((kw) => tlds.map((tld) => `${kw}.${tld}`));
+
+    const checkBatch = async (domains: string[]) => {
+        const CONCURRENCY = 10;
+        const results: { domain: string; available: boolean | null; owned: boolean; price?: string }[] = [];
+        for (let i = 0; i < domains.length; i += CONCURRENCY) {
+            const chunk = domains.slice(i, i + CONCURRENCY);
+            const chunkResults = await Promise.all(chunk.map(async (domain) => {
+                if (ownedZones.has(domain)) {
+                    return { domain, available: false, owned: true };
+                }
+                const tld = domain.split(".").slice(1).join(".");
+                const rdap = await checkAvailabilityRDAP(domain);
+                const price = pricingMap.get(tld);
+                return {
+                    domain,
+                    available: rdap.error ? null : !rdap.registered,
+                    owned: false,
+                    price,
+                };
+            }));
+            results.push(...chunkResults);
+        }
+        return results;
+    };
+
+    const results = await checkBatch(allDomains);
+
     const lines: string[] = [
-        `## Domain Search: "${keyword}"`,
-        `Checking ${tlds.length} TLDs...\n`,
-        `${"Domain".padEnd(35)} ${"Status".padEnd(12)} ${"CF Price"}`,
-        `${"-".repeat(65)}`,
+        `## Domain Search: ${keywords.map((k) => `"${k}"`).join(", ")}`,
+        `Checked ${results.length} combinations (${keywords.length} keyword(s) × ${tlds.length} TLD(s))\n`,
     ];
 
-    const results: { domain: string; available: boolean; owned: boolean; price?: string }[] = [];
-
-    for (let i = 0; i < tlds.length; i++) {
-        const domain = `${keyword}.${tlds[i]}`;
-
-        if (ownedZones.has(domain)) {
-            results.push({ domain, available: false, owned: true });
-        } else {
-            if (i > 0) await new Promise((r) => setTimeout(r, DELAY_MS));
-            const rdap = await checkAvailabilityRDAP(domain);
-            const price = pricingMap.get(tlds[i]);
-            results.push({
-                domain,
-                available: !rdap.registered,
-                owned: false,
-                price,
-            });
+    // Group by keyword if multiple keywords
+    const grouped = keywords.length > 1;
+    for (const kw of keywords) {
+        const kwResults = results.filter((r) => r.domain.startsWith(`${kw}.`));
+        if (grouped) {
+            const avail = kwResults.filter((r) => r.available === true && !r.owned).length;
+            lines.push(`### "${kw}" — ${avail} available`);
         }
+
+        lines.push(`${"Domain".padEnd(35)} ${"Status".padEnd(15)} ${"CF Price"}`);
+        lines.push(`${"-".repeat(65)}`);
+
+        for (const r of kwResults) {
+            if (args.available_only && r.available !== true && !r.owned) continue;
+            const status = r.owned ? "yours ✅" : r.available === true ? "available ✅" : r.available === null ? "unknown ❓" : "taken ❌";
+            const price = r.owned ? "owned" : r.available === true && r.price ? `$${r.price}/yr` : r.available === true ? "check CF" : "-";
+            lines.push(`${r.domain.padEnd(35)} ${status.padEnd(15)} ${price}`);
+        }
+        lines.push("");
     }
 
-    for (const r of results) {
-        if (args.available_only && !r.available && !r.owned) continue;
-
-        const status = r.owned ? "yours ✅" : r.available ? "available ✅" : "taken ❌";
-        const price = r.owned ? "owned" : r.available && r.price ? `$${r.price}/yr` : r.available ? "check CF" : "-";
-        lines.push(`${r.domain.padEnd(35)} ${status.padEnd(12)} ${price}`);
-    }
-
-    const available = results.filter((r) => r.available && !r.owned);
-    lines.push(`\n${available.length}/${tlds.length} domains available`);
+    const available = results.filter((r) => r.available === true && !r.owned);
+    lines.push(`**Summary:** ${available.length}/${results.length} available`);
 
     if (available.length > 0) {
-        lines.push(
-            `\nTo register: \`register_domain({ domain: "${available[0].domain}" })\``,
-        );
+        lines.push(`\nTo register: \`register_domain({ domain: "${available[0].domain}" })\``);
     }
 
     return textContent(lines.join("\n"));
