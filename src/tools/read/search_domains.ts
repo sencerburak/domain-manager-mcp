@@ -47,22 +47,22 @@ export async function handler(args: z.infer<typeof inputSchema>) {
 
     // Identify domains to verify on Porkbun:
     // 1. Domains where CF says unsupported TLD
-    // 2. Domains where CF says available (verify against false positives)
-    const pbCheckNeeded = new Set<string>();
+    // 2. Domains where CF says available (verify to catch false positives)
+    // Note: Porkbun rate limit is 1 check per 10 seconds per account.
+    // Cap at 3 total to avoid long waits (~33s max). For deeper checks use check_domain().
+    const pbCheckCandidates: string[] = [];
     toCheck.forEach((d) => {
         const r = cfMap.get(d);
-        if (!r) return; // No CF data
-        // Check unsupported TLDs
+        if (!r) return;
         if (r.reason === "extension_not_supported_via_api" || r.reason === "extension_not_supported") {
-            pbCheckNeeded.add(d);
-        }
-        // Also verify domains CF claims are available (catch false positives)
-        if (r.registrable) {
-            pbCheckNeeded.add(d);
+            pbCheckCandidates.push(d);
+        } else if (r.registrable) {
+            pbCheckCandidates.push(d);
         }
     });
+    const pbCheckNeeded = pbCheckCandidates.slice(0, 3);
 
-    const pbAvailability = await checkPorkbunDomainsBatch(Array.from(pbCheckNeeded));
+    const pbAvailability = await checkPorkbunDomainsBatch(pbCheckNeeded);
 
     type RowResult = {
         domain: string;
@@ -245,7 +245,7 @@ export async function handler(args: z.infer<typeof inputSchema>) {
     }
 
     lines.push(
-        `\n*Note: Porkbun pricing shown for reference. Use check_domain() for detailed availability on unsupported TLDs.*`,
+        `\n*Note: Porkbun rate limit is 1 check/10s — only first ${pbCheckNeeded.length} candidates verified. Use check_domain() for full per-domain Porkbun check.*`,
     );
 
     return textContent(lines.join("\n"));
