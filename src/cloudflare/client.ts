@@ -21,6 +21,18 @@ function getToken(): string {
 
 async function cfFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
     const url = path.startsWith("http") ? path : `${CF_BASE}${path}`;
+    const method = init.method ?? "GET";
+    
+    console.log(`[CF API] ${method} ${url}`);
+    if (init.body) {
+        try {
+            const body = JSON.parse(init.body as string);
+            console.log(`[CF API] Request body:`, JSON.stringify(body));
+        } catch (e) {
+            console.log(`[CF API] Request body (raw):`, init.body);
+        }
+    }
+    
     const resp = await fetch(url, {
         ...init,
         headers: {
@@ -30,13 +42,17 @@ async function cfFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
         },
     });
 
+    console.log(`[CF API] Response status: ${resp.status} ${resp.statusText}`);
+    
     const body = (await resp.json()) as CFResponse<T>;
 
     if (!body.success) {
+        console.error(`[CF API] Error response:`, JSON.stringify(body.errors));
         const err = body.errors[0] ?? { code: resp.status, message: resp.statusText };
         throw new CFError(resp.status, err.code, err.message);
     }
 
+    console.log(`[CF API] Success response`);
     return body.result;
 }
 

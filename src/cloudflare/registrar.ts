@@ -58,17 +58,29 @@ export async function registerDomain(
     domainName: string,
     opts: { auto_renew?: boolean; privacy?: boolean; years?: number } = {},
 ): Promise<CFRegistrarDomain> {
-    const accountId = await getAccountId();
-    const body: Record<string, unknown> = {
-        name: domainName,
-        auto_renew: opts.auto_renew ?? true,
-        privacy: opts.privacy ?? false,
-    };
-    if (opts.years) body.years = opts.years;
-    return cfClient.post<CFRegistrarDomain>(
-        `/accounts/${accountId}/registrar/domains`,
-        body,
-    );
+    console.log(`[Registrar] registerDomain('${domainName}', ${JSON.stringify(opts)})`);
+    try {
+        const accountId = await getAccountId();
+        console.log(`[Registrar] Got account ID: ${accountId}`);
+        
+        const body: Record<string, unknown> = {
+            name: domainName,
+            auto_renew: opts.auto_renew ?? true,
+            privacy: opts.privacy ?? false,
+        };
+        if (opts.years) body.years = opts.years;
+        
+        console.log(`[Registrar] Calling POST /accounts/${accountId}/registrar/domains with:`, JSON.stringify(body));
+        const result = await cfClient.post<CFRegistrarDomain>(
+            `/accounts/${accountId}/registrar/domains`,
+            body,
+        );
+        console.log(`[Registrar] Domain registered successfully:`, result.name, `expires: ${result.expires_at}`);
+        return result;
+    } catch (err) {
+        console.error(`[Registrar] Error registering domain:`, err instanceof Error ? err.message : String(err));
+        throw err;
+    }
 }
 
 /** Renew a domain registered through Cloudflare Registrar. */

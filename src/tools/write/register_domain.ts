@@ -30,6 +30,7 @@ export const inputSchema = z.object({
 
 export async function handler(args: z.infer<typeof inputSchema>) {
     const domain = args.domain.toLowerCase();
+    console.log(`[Tool] register_domain called with domain="${domain}"`);
 
     // Look up pricing before registering (gives context to user in confirmation)
     let priceLine = "";
@@ -41,8 +42,8 @@ export async function handler(args: z.infer<typeof inputSchema>) {
             const cost = (parseFloat(p.registration_fee) * args.years).toFixed(2);
             priceLine = `\n**Charge:** $${cost} ($${p.registration_fee}/yr × ${args.years} year${args.years > 1 ? "s" : ""})`;
         }
-    } catch {
-        /* non-fatal */
+    } catch (err) {
+        console.log(`[Tool] Non-fatal error getting TLD policies:`, err instanceof Error ? err.message : String(err));
     }
 
     try {
@@ -52,6 +53,7 @@ export async function handler(args: z.infer<typeof inputSchema>) {
             years: args.years,
         });
 
+        console.log(`[Tool] register_domain succeeded`);
         return textContent(
             [
                 `## Domain Registered: ${domain} ✅`,
@@ -67,8 +69,9 @@ export async function handler(args: z.infer<typeof inputSchema>) {
                 .join("\n"),
         );
     } catch (e) {
-        return errorContent(
-            `Failed to register ${domain}: ${e instanceof Error ? e.message : String(e)}`,
-        );
+        const errMsg = e instanceof Error ? e.message : String(e);
+        console.error(`[Tool] register_domain failed: ${errMsg}`);
+        console.error(`[Tool] Full error:`, e);
+        return errorContent(`Failed to register ${domain}: ${errMsg}`);
     }
 }
