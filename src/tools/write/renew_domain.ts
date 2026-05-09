@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { renewDomain, getRegistrarDomain, getTLDPolicies } from "../../cloudflare/registrar.js";
+import { renewDomain, getRegistrarDomain, checkDomainsBatch } from "../../cloudflare/registrar.js";
 import { textContent, errorContent } from "../../types.js";
 
 export const name = "renew_domain";
@@ -29,14 +29,12 @@ export async function handler(args: z.infer<typeof inputSchema>) {
         );
     }
 
-    // Pricing info for confirmation context
+    // Pricing info for confirmation context — use the domain's renewal cost from registrar record
     let priceLine = "";
     try {
-        const tld = domain.split(".").slice(1).join(".");
-        const policies = await getTLDPolicies([tld]);
-        if (policies.length > 0) {
-            const cost = (parseFloat(policies[0].renewal_fee) * args.years).toFixed(2);
-            priceLine = `\n**Charge:** $${cost} ($${policies[0].renewal_fee}/yr × ${args.years} year${args.years > 1 ? "s" : ""})`;
+        if (current.fees?.renewal_fee) {
+            const cost = (parseFloat(current.fees.renewal_fee) * args.years).toFixed(2);
+            priceLine = `\n**Charge:** $${cost} ($${current.fees.renewal_fee}/yr × ${args.years} year${args.years > 1 ? "s" : ""})`;
         }
     } catch {
         /* non-fatal */

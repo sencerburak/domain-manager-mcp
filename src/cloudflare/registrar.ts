@@ -1,5 +1,5 @@
 import { cfClient, getAccountId, CFError } from "./client.js";
-import type { CFRegistrarDomain, CFTLDPolicy, CFDomainCheckResult, CFRegistrationResult } from "../types.js";
+import type { CFRegistrarDomain, CFDomainCheckResult, CFRegistrationResult } from "../types.js";
 
 /** List all domains registered through Cloudflare Registrar. */
 export async function listRegistrarDomains(): Promise<CFRegistrarDomain[]> {
@@ -37,17 +37,6 @@ export async function getRegistrarDomain(domainName: string): Promise<CFRegistra
         if (e instanceof CFError && (e.status === 404 || e.code === 1224)) return null;
         throw e;
     }
-}
-
-/** Get TLD pricing policies from Cloudflare Registrar. */
-export async function getTLDPolicies(tlds?: string[]): Promise<CFTLDPolicy[]> {
-    const accountId = await getAccountId();
-    const all = await cfClient.get<CFTLDPolicy[]>(
-        `/accounts/${accountId}/registrar/tld-policies`,
-    );
-    if (!tlds || tlds.length === 0) return all;
-    const set = new Set(tlds.map((t) => t.toLowerCase().replace(/^\./, "")));
-    return all.filter((p) => set.has(p.tld.toLowerCase()));
 }
 
 /**

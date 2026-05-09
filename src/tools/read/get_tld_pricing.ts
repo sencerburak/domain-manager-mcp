@@ -1,11 +1,11 @@
 import { z } from "zod";
-import { getTLDPolicies } from "../../cloudflare/registrar.js";
+import { checkDomainsBatch } from "../../cloudflare/registrar.js";
 import { getPorkbunPricing } from "../../porkbun/pricing.js";
 import { textContent } from "../../types.js";
 
 export const name = "get_tld_pricing";
 export const description =
-    "Get domain pricing for TLDs. Shows Cloudflare Registrar pricing (registration, renewal, grace period) and Porkbun pricing for comparison. Use this before registering a domain to compare costs across registrars.";
+    "Get domain pricing for TLDs. Shows Cloudflare Registrar pricing (registration, renewal, in your account's currency) and Porkbun pricing for comparison. Use this before registering a domain to compare costs across registrars.";
 
 export const inputSchema = z.object({
     tlds: z
@@ -19,54 +19,76 @@ export const inputSchema = z.object({
 export async function handler(args: z.infer<typeof inputSchema>) {
     const tlds = args.tlds.map((t) => t.toLowerCase().replace(/^\./, ""));
 
-    // Fetch CF and Porkbun pricing in parallel
-    const [policies, pbPricing] = await Promise.all([
-        getTLDPolicies(tlds),
+    // Use the domain-check endpoint (POST /registrar/domain-check) to get real
+    // pricing from CF. The deprecated /registrar/tld-policies endpoint does not
+    // exist in the public API. We probe with a long random-looking name that's
+    // virtually certain to be available on every TLD — we only want the price,
+    // not to actually register it.
+    const sampleBase = "zz-price-probe-noreply";
+    const sampleDomains = tlds.map((t) => `${sampleBase}.${t}`);
+
+    // Fetch CF pricing and Porkbun pricing in parallel
+    const [cfResults, pbPricing] = await Promise.all([
+        checkDomainsBatch(sampleDomains),
         getPorkbunPricing(tlds),
     ]);
 
-    const policySet = new Set(policies.map((p) => p.tld.toLowerCase()));
+    // Build a map from TLD → CF check result
+    const cfMap = new Map(cfResults.map((r) => {
+        const tld = r.name.split(".").slice(1).join(".");
+        return [tld, r];
+    }));
 
-    // TLDs with CF data
+    // Determine the display currency from the first result that has pricing
+    const currency = [...cfMap.values()].find((r) => r.pricing)?.pricing?.currency ?? "USD";
+
     const lines: string[] = [
-        `## TLD Pricing Comparison (${tlds.length} TLD${tlds.length === 1 ? "" : "s"})\n`,
-        `${"TLD".padEnd(10)} ${"CF Reg".padEnd(10)} ${"CF Renew".padEnd(11)} ${"PB Reg".padEnd(10)} ${"PB Renew".padEnd(10)} CF Grace`,
-        "-".repeat(70),
+        `## TLD Pricing Comparison (${tlds.length} TLD${tlds.length === 1 ? "" : "s"}) · ${currency}\n`,
+        `${"TLD".padEnd(10)} ${"CF Reg".padEnd(12)} ${"CF Renew".padEnd(12)} ${"PB Reg".padEnd(12)} PB Renew`,
+        "-".repeat(60),
     ];
 
+    const cfUnsupportedApi: string[] = [];
+    const cfUnsupported: string[] = [];
+
     for (const tld of [...tlds].sort()) {
-        const policy = policies.find((p) => p.tld.toLowerCase() === tld);
+        const r = cfMap.get(tld);
         const pb = pbPricing.get(tld);
 
-        const cfReg = policy?.supported ? `$${policy.registration_fee}` : "—";
-        const cfRenew = policy?.supported ? `$${policy.renewal_fee}` : "—";
-        const cfGrace = policy?.supported ? `${policy.grace_period}d` : "—";
-        const pbReg = pb ? `$${pb.registration}` : "—";
-        const pbRenew = pb ? `$${pb.renewal}` : "—";
+        let cfReg = "—";
+        let cfRenew = "—";
+
+        if (r?.registrable && r.pricing) {
+            cfReg = `${r.pricing.registration_cost}`;
+            cfRenew = `${r.pricing.renewal_cost}`;
+        } else if (r?.reason === "extension_not_supported_via_api") {
+            cfReg = "dashboard";
+            cfRenew = "dashboard";
+            cfUnsupportedApi.push(tld);
+        } else if (r?.reason === "extension_not_supported") {
+            cfUnsupportedApi.push(tld);
+        } else if (!r) {
+            cfUnsupported.push(tld);
+        }
+
+        const pbReg = pb ? `${pb.registration}` : "—";
+        const pbRenew = pb ? `${pb.renewal}` : "—";
 
         lines.push(
-            `${"." + tld.padEnd(9)} ${cfReg.padEnd(10)} ${cfRenew.padEnd(11)} ${pbReg.padEnd(10)} ${pbRenew.padEnd(10)} ${cfGrace}`,
+            `${"." + tld.padEnd(9)} ${cfReg.padEnd(12)} ${cfRenew.padEnd(12)} ${pbReg.padEnd(12)} ${pbRenew}`,
         );
     }
 
-    // TLDs missing from CF entirely (not returned by policy API)
-    const missing = tlds.filter((t) => !policySet.has(t));
-    if (missing.length > 0) {
-        lines.push("");
-        lines.push("**Not found in CF Registrar API** (shown with Porkbun pricing only):");
-        for (const tld of missing) {
-            const pb = pbPricing.get(tld);
-            if (pb) {
-                lines.push(`- .${tld}: Porkbun reg $${pb.registration}/yr, renew $${pb.renewal}/yr`);
-            } else {
-                lines.push(`- .${tld}: not available at Porkbun either`);
-            }
-        }
+    if (cfUnsupportedApi.length > 0) {
+        lines.push(`\n*"dashboard" = supported by CF Registrar but not via API; register at dash.cloudflare.com*`);
+    }
+    if (cfUnsupported.length > 0) {
+        lines.push(`\n*Not in CF Registrar: ${cfUnsupported.map((t) => "." + t).join(", ")}*`);
     }
 
-    const cfSupported = policies.filter((p) => p.supported).length;
+    const cfSupported = cfResults.filter((r) => r.registrable || r.reason === "extension_not_supported_via_api").length;
     const pbSupported = pbPricing.size;
-    lines.push(`\n*CF: ${cfSupported}/${policies.length} TLDs supported · Porkbun: ${pbSupported}/${tlds.length} TLDs found*`);
+    lines.push(`\n*CF: ${cfSupported}/${tlds.length} TLDs · Porkbun: ${pbSupported}/${tlds.length} TLDs · Prices per year*`);
 
     return textContent(lines.join("\n"));
 }

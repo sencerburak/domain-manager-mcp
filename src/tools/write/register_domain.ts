@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { registerDomain, getTLDPolicies } from "../../cloudflare/registrar.js";
+import { registerDomain, checkDomainsBatch } from "../../cloudflare/registrar.js";
 import { textContent, errorContent } from "../../types.js";
 
 export const name = "register_domain";
@@ -35,15 +35,16 @@ export async function handler(args: z.infer<typeof inputSchema>) {
     // Look up pricing before registering (gives context to user in confirmation)
     let priceLine = "";
     try {
-        const tld = domain.split(".").slice(1).join(".");
-        const policies = await getTLDPolicies([tld]);
-        if (policies.length > 0 && policies[0].supported) {
-            const p = policies[0];
-            const cost = (parseFloat(p.registration_fee) * args.years).toFixed(2);
-            priceLine = `\n**Charge:** $${cost} ($${p.registration_fee}/yr × ${args.years} year${args.years > 1 ? "s" : ""})`;
+        const [check] = await checkDomainsBatch([domain]);
+        if (check?.registrable && check.pricing) {
+            const p = check.pricing;
+            const reg = parseFloat(p.registration_cost);
+            const renew = parseFloat(p.renewal_cost);
+            const cost = args.years === 1 ? reg.toFixed(2) : (reg + renew * (args.years - 1)).toFixed(2);
+            priceLine = `\n**Charge:** ${p.currency} ${cost} (${p.registration_cost} first yr, ${p.renewal_cost}/yr after)`;
         }
     } catch (err) {
-        console.log(`[Tool] Non-fatal error getting TLD policies:`, err instanceof Error ? err.message : String(err));
+        console.log(`[Tool] Non-fatal error getting domain pricing:`, err instanceof Error ? err.message : String(err));
     }
 
     try {
