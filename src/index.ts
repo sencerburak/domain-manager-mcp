@@ -5,6 +5,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import http from "http";
 import { readFileSync } from "fs";
 import { join } from "path";
+import { requestContext } from "./context.js";
 
 // Logging utility with timestamp and level
 function log(level: string, message: string, meta?: Record<string, unknown>) {
@@ -63,9 +64,9 @@ async function main() {
     const httpsProxy = process.env.HTTPS_PROXY;
 
     if (!cfToken) {
-        log("WARN", "CLOUDFLARE_API_TOKEN not set — Cloudflare tools will fail");
+        log("INFO", "CLOUDFLARE_API_TOKEN not set in env — tokens must be supplied per-request via Authorization: Bearer <token>");
     } else {
-        log("INFO", "CLOUDFLARE_API_TOKEN configured", { token_length: cfToken.length });
+        log("INFO", "CLOUDFLARE_API_TOKEN configured (env fallback)", { token_length: cfToken.length });
     }
 
     if (httpProxy || httpsProxy) {
@@ -86,6 +87,14 @@ async function main() {
                 res.writeHead(405).end();
                 return;
             }
+
+            // Extract per-request Cloudflare token from Authorization header.
+            // Falls back to CLOUDFLARE_API_TOKEN env var (set in requestContext).
+            const authHeader = req.headers["authorization"] ?? "";
+            const cfToken = authHeader.startsWith("Bearer ")
+                ? authHeader.slice("Bearer ".length).trim()
+                : (process.env.CLOUDFLARE_API_TOKEN ?? undefined);
+
             const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
             const server = createMcpServer();
             await server.connect(transport);
@@ -98,7 +107,9 @@ async function main() {
                 try { body = JSON.parse(data); } catch { body = null; }
             }
             try {
-                await transport.handleRequest(req, res, body);
+                // Run the request inside the per-request context so cloudflare/client.ts
+                // getToken() picks up this caller's token, not a shared env var.
+                await requestContext.run({ cfToken }, () => transport.handleRequest(req, res, body));
             } finally {
                 await server.close().catch(() => { });
             }

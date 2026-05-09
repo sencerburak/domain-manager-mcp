@@ -1,4 +1,5 @@
 import type { CFResponse, CFAccount } from "../types.js";
+import { requestContext } from "../context.js";
 
 const CF_BASE = "https://api.cloudflare.com/client/v4";
 
@@ -14,8 +15,10 @@ export class CFError extends Error {
 }
 
 function getToken(): string {
-    const token = process.env.CLOUDFLARE_API_TOKEN;
-    if (!token) throw new Error("CLOUDFLARE_API_TOKEN environment variable is required");
+    // Prefer the per-request token injected via Authorization header.
+    const ctx = requestContext.getStore();
+    const token = ctx?.cfToken ?? process.env.CLOUDFLARE_API_TOKEN;
+    if (!token) throw new Error("No Cloudflare API token: provide Authorization: Bearer <token> or set CLOUDFLARE_API_TOKEN");
     return token;
 }
 
@@ -72,15 +75,18 @@ export const cfClient = {
 
 // ─── Account resolution ───────────────────────────────────────────────────────
 
-let _accountId: string | null = null;
+// Keyed by token so concurrent users don't share each other's account ID.
+const _accountIdCache = new Map<string, string>();
 
 export async function getAccountId(): Promise<string> {
-    if (_accountId) return _accountId;
+    const token = getToken();
+    const cached = _accountIdCache.get(token);
+    if (cached) return cached;
 
     const envId = process.env.CLOUDFLARE_ACCOUNT_ID;
     if (envId) {
-        _accountId = envId;
-        return _accountId;
+        _accountIdCache.set(token, envId);
+        return envId;
     }
 
     const accounts = await cfClient.get<CFAccount[]>("/accounts?per_page=10");
@@ -94,6 +100,6 @@ export async function getAccountId(): Promise<string> {
         );
     }
 
-    _accountId = accounts[0].id;
-    return _accountId;
+    _accountIdCache.set(token, accounts[0].id);
+    return accounts[0].id;
 }
